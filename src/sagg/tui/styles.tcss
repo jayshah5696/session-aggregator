@@ -1,0 +1,263 @@
+/* Session Aggregator TUI - Industrial Dark Theme */
+
+/* Base colors */
+$background: #0d1117;
+$surface: #161b22;
+$surface-alt: #21262d;
+$border: #30363d;
+$border-focus: #58a6ff;
+$text: #c9d1d9;
+$text-dim: #8b949e;
+$user: #58a6ff;
+$assistant: #7ee787;
+$tool: #d29922;
+$error: #f85149;
+
+/* Global */
+Screen {
+    background: $background;
+    color: $text;
+}
+
+/* Layout containers */
+#main-container {
+    layout: horizontal;
+    height: 100%;
+}
+
+#left-panel {
+    width: 35%;
+    min-width: 30;
+    max-width: 50;
+    height: 100%;
+    border-right: solid $border;
+}
+
+#right-panel {
+    width: 1fr;
+    height: 100%;
+    layout: vertical;
+}
+
+/* Search bar in left panel */
+#search-bar {
+    height: 3;
+    background: $surface-alt;
+    border-bottom: solid $border;
+    padding: 0;
+}
+
+#search-label {
+    width: 3;
+    padding: 1 1;
+    color: $user;
+}
+
+#search-input {
+    width: 1fr;
+    background: $surface;
+    border: none;
+    padding: 0 1;
+}
+
+#search-input:focus {
+    border: solid $border-focus;
+}
+
+/* Session Tree */
+SessionTree {
+    background: $surface;
+    height: 1fr;
+    padding: 0;
+    scrollbar-background: $surface;
+    scrollbar-color: $border;
+    scrollbar-color-hover: $text-dim;
+    scrollbar-color-active: $text;
+}
+
+SessionTree:focus {
+    border: solid $border-focus;
+}
+
+SessionTree > .tree--cursor {
+    background: $surface-alt;
+    color: $text;
+}
+
+SessionTree > .tree--highlight {
+    background: $surface-alt;
+}
+
+SessionTree > .tree--guides {
+    color: $border;
+}
+
+SessionTree > .tree--guides-hover {
+    color: $text-dim;
+}
+
+/* Stats panel */
+#stats-panel {
+    height: 3;
+    padding: 1 1;
+    background: $surface;
+    border-top: solid $border;
+}
+
+/* Chat header with title and search */
+#chat-header {
+    height: 3;
+    background: $surface-alt;
+    border-bottom: solid $border;
+    layout: horizontal;
+}
+
+#chat-title {
+    width: auto;
+    padding: 1 2;
+    color: $text;
+    text-style: bold;
+}
+
+#chat-search {
+    width: 1fr;
+    max-width: 40;
+    background: $surface;
+    border: none;
+    margin: 0 1;
+}
+
+#chat-search:focus {
+    border: solid $border-focus;
+}
+
+/* Chat View - scrollable conversation */
+ChatView {
+    background: $surface;
+    height: 1fr;
+    padding: 1 2;
+    scrollbar-background: $surface;
+    scrollbar-color: $border;
+    scrollbar-color-hover: $text-dim;
+    scrollbar-color-active: $text;
+}
+
+ChatView:focus {
+    border: solid $border-focus;
+}
+
+/* Chat message styling */
+.chat-header {
+    margin-bottom: 1;
+    padding: 1;
+    background: $surface-alt;
+    border: solid $border;
+}
+
+.chat-message {
+    margin-bottom: 1;
+    padding: 0 1;
+}
+
+.chat-user {
+    border-left: thick $user;
+    padding-left: 2;
+}
+
+.chat-assistant {
+    border-left: thick $assistant;
+    padding-left: 2;
+}
+
+.chat-tool {
+    border-left: thick $tool;
+    padding-left: 2;
+}
+
+/* Search match highlight */
+.chat-match {
+    background: #2d2006;
+}
+
+.chat-system {
+    border-left: thick $text-dim;
+    padding-left: 2;
+    color: $text-dim;
+}
+
+.chat-placeholder {
+    padding: 4;
+    text-align: center;
+}
+
+/* Help Modal */
+#help-modal {
+    align: center middle;
+}
+
+#help-content {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    background: $surface;
+    border: solid $border;
+    padding: 1 2;
+}
+
+/* Export Modal */
+#export-modal {
+    align: center middle;
+}
+
+#export-content {
+    width: 50;
+    height: auto;
+    background: $surface;
+    border: solid $border;
+    padding: 1 2;
+}
+
+/* Footer */
+Footer {
+    background: $surface-alt;
+    color: $text-dim;
+    height: 1;
+}
+
+Footer .footer--key {
+    color: $user;
+    text-style: bold;
+}
+
+Footer .footer--description {
+    color: $text-dim;
+}
+
+/* Loading */
+LoadingIndicator {
+    color: $user;
+}
+
+/* Notifications */
+Toast {
+    background: $surface-alt;
+    border: solid $border;
+    color: $text;
+}
+
+/* Scrollbars */
+Scrollbar {
+    background: $surface;
+}
+
+ScrollBar > .scrollbar--bar {
+    color: $border;
+}
+
+ScrollBar > .scrollbar--bar-hover {
+    color: $text-dim;
+}
+
+ScrollBar > .scrollbar--bar-active {
+    color: $text;
+}
