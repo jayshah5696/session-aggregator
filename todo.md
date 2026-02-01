@@ -9,6 +9,14 @@
 
 ## Progress Log
 
+### 2026-02-01
+
+#### Completed
+- [x] Gemini CLI adapter (session JSON in `~/.gemini/tmp/<project_hash>/chats/`)
+- [x] SourceTool + config defaults updated for Gemini CLI
+- [x] Documentation updates (spec.md, todo.md, README.md)
+- [x] Config tests updated for new source
+
 ### 2026-01-29
 
 #### Completed
@@ -58,6 +66,7 @@
 - [x] Claude Code adapter (claude.py)
 - [x] Codex adapter (codex.py)
 - [x] Cursor adapter (cursor.py)
+- [x] Gemini CLI adapter (gemini.py)
 
 ### Phase 2: CLI & Export - COMPLETE
 

@@ -1,8 +1,8 @@
 """Unified session models for session-aggregator.
 
 This module defines the canonical data models for representing coding sessions
-from various AI tools (OpenCode, Claude, Codex, Cursor, Antigravity) in a
-unified format.
+from various AI tools (OpenCode, Claude, Codex, Cursor, Gemini CLI, Ampcode,
+Antigravity) in a unified format.
 """
 
 import time
@@ -22,6 +22,7 @@ class SourceTool(str, Enum):
     CLAUDE = "claude"
     CODEX = "codex"
     CURSOR = "cursor"
+    GEMINI = "gemini"
     ANTIGRAVITY = "antigravity"
     AMPCODE = "ampcode"
 

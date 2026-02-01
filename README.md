@@ -4,7 +4,7 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 
 ## Features
 
-- **Multi-tool support**: Collect sessions from OpenCode, Claude Code, Codex CLI, Cursor, and Ampcode
+- **Multi-tool support**: Collect sessions from OpenCode, Claude Code, Codex CLI, Cursor, Gemini CLI, and Ampcode
 - **Interactive TUI**: Browse sessions with a terminal UI (vim keybindings, search, export)
 - **Unified format**: Normalize sessions into a consistent data model
 - **Full-text search**: Search across all sessions with SQLite FTS5
@@ -31,6 +31,7 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 | Claude Code | Supported | `~/.claude/projects/` |
 | OpenAI Codex CLI | Supported | `~/.codex/sessions/` |
 | Cursor | Supported | Platform-specific SQLite database |
+| Gemini CLI | Supported | `~/.gemini/tmp/` |
 | Ampcode | Supported | Cloud-based (capture via `--stream-json`) |
 
 ## Installation

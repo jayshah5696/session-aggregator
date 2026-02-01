@@ -35,7 +35,7 @@ class TestDefaultConfig:
     def test_default_config_has_all_sources(self):
         """Default config should have entries for all expected sources."""
         config = get_default_config()
-        expected_sources = ["opencode", "claude", "codex", "cursor", "ampcode"]
+        expected_sources = ["opencode", "claude", "codex", "cursor", "gemini", "ampcode"]
         for source in expected_sources:
             assert source in config.sources
             assert isinstance(config.sources[source], SourceConfig)
@@ -337,6 +337,10 @@ path = "~/.codex/sessions"
 enabled = true
 path = "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
 
+[sources.gemini]
+enabled = true
+path = "~/.gemini/tmp"
+
 [sources.ampcode]
 enabled = true
 path = "~/.sagg/cache/ampcode"
@@ -355,11 +359,12 @@ output_dir = "~/.sagg/exports"
         config = load_config(config_path)
 
         # Verify all sources
-        assert len(config.sources) >= 5
+        assert len(config.sources) >= 6
         assert config.sources["opencode"].enabled is True
         assert config.sources["claude"].enabled is True
         assert config.sources["codex"].enabled is True
         assert config.sources["cursor"].enabled is True
+        assert config.sources["gemini"].enabled is True
         assert config.sources["ampcode"].enabled is True
 
         # Verify viewer

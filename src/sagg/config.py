@@ -119,6 +119,10 @@ def get_default_config() -> Config:
             enabled=True,
             path="~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
         ),
+        "gemini": SourceConfig(
+            enabled=True,
+            path="~/.gemini/tmp",
+        ),
         "ampcode": SourceConfig(
             enabled=True,
             path="~/.sagg/cache/ampcode",

@@ -2,7 +2,7 @@
 
 **Project**: Unified AI Coding Session Aggregator  
 **Version**: 0.1.0  
-**Date**: January 29, 2026  
+**Date**: February 1, 2026  
 **Status**: Draft
 
 ---
@@ -11,7 +11,7 @@
 
 ### 1.1 Problem Statement
 
-Developers using multiple AI coding tools (OpenCode, Claude Code, Codex, Antigravity, Cursor) have session data scattered across different locations in incompatible formats. There is no unified way to:
+Developers using multiple AI coding tools (OpenCode, Claude Code, Codex, Cursor, Ampcode, Gemini CLI, Antigravity) have session data scattered across different locations in incompatible formats. There is no unified way to:
 - View all sessions in one place
 - Search across sessions from different tools
 - Convert sessions to a standard format (AgentTrace)
@@ -80,6 +80,8 @@ Build **Session Aggregator** (`sagg`), a CLI tool and viewer that:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+Adapter layer includes OpenCode, Claude Code, Codex, Cursor, Ampcode, Gemini CLI, and Antigravity (research).
+
 ---
 
 ## 3. Data Model
@@ -90,7 +92,7 @@ Build **Session Aggregator** (`sagg`), a CLI tool and viewer that:
 interface UnifiedSession {
   // Identity
   id: string;                    // UUID v7 (time-sortable)
-  source: SourceTool;            // 'opencode' | 'claude' | 'codex' | 'cursor' | 'antigravity'
+  source: SourceTool;            // 'opencode' | 'claude' | 'codex' | 'cursor' | 'gemini' | 'ampcode' | 'antigravity'
   sourceId: string;              // Original session ID
   sourcePath: string;            // Original file path
   
@@ -165,7 +167,7 @@ interface TokenUsage {
   cachedTokens?: number;
 }
 
-type SourceTool = 'opencode' | 'claude' | 'codex' | 'cursor' | 'ampcode' | 'antigravity';
+type SourceTool = 'opencode' | 'claude' | 'codex' | 'cursor' | 'gemini' | 'ampcode' | 'antigravity';
 ```
 
 ### 3.2 SQLite Schema (Metadata + Search)
@@ -309,6 +311,10 @@ path = "~/.codex/sessions"
 enabled = true
 # macOS default
 path = "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+
+[sources.gemini]
+enabled = true
+path = "~/.gemini/tmp"
 
 [sources.antigravity]
 enabled = false  # Format not documented yet
@@ -512,7 +518,47 @@ type AmpMessage =
 - No model info per message (assumes Anthropic models)
 - Session IDs prefixed with `T-`
 
-### 5.7 Antigravity Adapter (Research Only)
+### 5.7 Gemini CLI Adapter
+
+**Input**: `~/.gemini/tmp/<project_hash>/chats/` (base path respects `GEMINI_CLI_HOME`)
+
+**Session Files**: `session-<YYYY-MM-DDTHH-MM>-<session_id_prefix>.json`
+
+**Session Record Format**:
+```typescript
+type GeminiConversation = {
+  sessionId: string;
+  projectHash: string;
+  startTime: string;     // ISO timestamp
+  lastUpdated: string;   // ISO timestamp
+  messages: MessageRecord[];
+  summary?: string;
+  directories?: string[];
+}
+
+type MessageRecord =
+  | { type: "user"; id: string; timestamp: string; content: PartListUnion; displayContent?: PartListUnion }
+  | { type: "gemini"; id: string; timestamp: string; content: PartListUnion | string; model?: string; tokens?: TokensSummary; toolCalls?: ToolCallRecord[] }
+  | { type: "info" | "warning" | "error"; id: string; timestamp: string; content: PartListUnion | string };
+```
+
+**Mapping**:
+| Gemini CLI | Unified |
+|------------|---------|
+| `sessionId` | `sourceId` |
+| `startTime` / `lastUpdated` | `createdAt` / `updatedAt` |
+| `messages[].type: user` | `message.role: user` |
+| `messages[].type: gemini` | `message.role: assistant` |
+| `messages[].tokens` | `usage.inputTokens` / `usage.outputTokens` |
+| `toolCalls[]` | `part.type: tool_call` + `part.type: tool_result` |
+| `directories[0]` | `projectPath` (best-effort) |
+| `summary` | `title` (fallback to first user message) |
+
+**Key Notes**:
+- Sessions are per-project and stored under a hashed project directory.
+- Full project path is not stored directly; `directories` is used as best-effort.
+
+### 5.8 Antigravity Adapter (Research Only)
 
 **Status**: **DEPRIORITIZED**. Research indicates high risk due to proprietary binary formats.
 

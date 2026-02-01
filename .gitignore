@@ -2,7 +2,7 @@
 .venv/
 venv/
 env/
-
+.github/
 # Python cache
 __pycache__/
 *.py[cod]
@@ -32,3 +32,6 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+.gemini/
+gha-creds-*.json

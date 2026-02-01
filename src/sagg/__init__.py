@@ -2,7 +2,8 @@
 sagg - Session Aggregator
 
 Unified AI Coding Session Aggregator - collect, search, and export sessions
-from multiple AI coding tools (OpenCode, Claude Code, Codex, Cursor).
+from multiple AI coding tools (OpenCode, Claude Code, Codex, Cursor, Gemini CLI,
+Ampcode).
 """
 
 __version__ = "0.1.0"
