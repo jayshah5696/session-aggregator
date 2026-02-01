@@ -281,6 +281,7 @@ sagg serve                        # Start web viewer on localhost:3000
 sagg serve --port 8080            # Custom port
 
 # Management
+sagg init                         # Setup wizard - finds your AI tools automatically
 sagg sources                      # List configured sources
 sagg sources add --type cursor --path "..."
 sagg prune --older-than 90d       # Remove old sessions
@@ -756,6 +757,28 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 - [ ] Homebrew/cargo/pip packaging
 - [ ] GitHub release
 
+### Phase 5: Smart Features (3 weeks)
+
+**Week 1: Setup**
+- [ ] `sagg init` command that finds your AI tools and sets up config
+- [ ] Better adapter detection (check what's actually installed)
+- [ ] Fix configuration handling
+- [ ] Build session fingerprinting - hash the problem type, files touched, and approach used
+
+**Week 2: Session fingerprints**
+- [ ] Extract what the session was trying to solve (using embeddings)
+- [ ] Generate signatures based on file patterns
+- [ ] Track the sequence of tools used
+- [ ] Fast similarity search (LSH)
+- [ ] `sagg session-dna` and `sagg similar` commands
+
+**Week 3: Tool comparison**
+- [ ] Track which suggestions get accepted vs rejected
+- [ ] Classify tasks automatically (bugfix vs feature vs refactor)
+- [ ] Collect timing and cost data
+- [ ] Basic `sagg benchmark` command
+- [ ] Simple recommendation engine ("use Claude for Python debugging")
+
 ---
 
 ## 9. Technology Choices
@@ -802,22 +825,35 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 - [x] Export to AgentTrace format
 - [x] TUI viewer with session tree and scrollable chat (`sagg tui`)
 
-### v1.0 - IN PROGRESS
+### v1.0 - COMPLETED
 - [x] All MVP features stable
 - [x] Analytics via `sagg stats` command
-- [ ] Watch mode for live collection
-- [ ] Installable via Homebrew/pip
+- [x] Watch mode for live collection (`sagg sync --watch`)
+- [x] Config file support (`~/.sagg/config.toml`)
 - [x] Basic documentation (README, spec.md)
+- [ ] Installable via Homebrew/pip (pending)
 
-### v1.1 - PLANNED (Sync & Portability)
-- [ ] `sagg sync` - Incremental sync with watch mode
-- [ ] `sagg export` / `sagg import` - Multi-machine session portability
-- [ ] Cost tracking with pricing data
+### v1.1 - COMPLETED (Sync & Portability)
+- [x] `sagg sync` - Incremental sync with watch mode
+- [x] `sagg bundle export` / `sagg bundle import` - Multi-machine session portability
+- [x] `sagg budget` - Token budget tracking with alerts
+- [x] `sagg git-link` - Associate sessions with git commits
+- [x] `sagg heatmap` - GitHub-style activity visualization
+- [ ] Cost tracking with pricing data (pending)
 
-### v1.2 - PLANNED (Analytics)
-- [ ] `sagg analyze` - Query clustering and topic modeling
-- [ ] TUI analytics dashboard with visualizations
-- [ ] `sagg skill-suggestions` - Auto-generate skills, commands, hooks, agents
+### v1.2 - COMPLETED (Analytics)
+- [x] `sagg oracle` - "Have I solved this before?" semantic search
+- [x] `sagg similar` - Find similar sessions using TF-IDF
+- [x] `sagg friction-points` - Detect sessions with excessive retries/errors
+- [ ] `sagg analyze` - Query clustering and topic modeling (pending)
+- [ ] TUI analytics dashboard with visualizations (pending)
+- [ ] `sagg skill-suggestions` - Auto-generate skills (pending)
+
+### v1.3 - PLANNED (Smart features)
+- [ ] `sagg init` - setup wizard that detects your tools
+- [ ] Tool benchmarking - track which AI works best for what
+- [ ] `sagg benchmark` - get recommendations based on your actual usage
+- [ ] Smart routing - suggest the best tool for each task
 
 ### Future
 - [ ] Session replay/debugging mode
@@ -856,7 +892,9 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 
 ## 13. Feature Roadmap (v1.1+)
 
-### 13.1 `sagg sync` - Incremental Synchronization
+### 13.1 `sagg sync` - Incremental Synchronization ✅ COMPLETED
+
+**Status**: Implemented January 31, 2026. Tests: 17/17 passing.
 
 **CLI Interface:**
 ```bash
@@ -867,7 +905,7 @@ Options:
   --full                 Force full rescan (ignore sync state)
   --dry-run              Show what would be synced without making changes
   -v, --verbose          Show detailed progress
-  
+
 Watch Mode:
   --watch, -w            Watch for changes and sync continuously
   --debounce INTEGER     Debounce interval in ms (default: 2000)
@@ -878,8 +916,6 @@ Watch Mode:
 - **Per-source sync state**: Store `last_sync_at`, `cursor`, `session_count` in SQLite
 - **Watch mode**: Use `watchfiles` library (Rust-backed, cross-platform)
 - **Debouncing**: 500ms for OpenCode/Codex, 2000ms for Cursor (SQLite WAL)
-
-**Effort**: 4-5 days
 
 ---
 
@@ -1305,6 +1341,8 @@ analytics = [
 | `sagg friction-points` | Detect sessions with excessive back-and-forth or restarts | Low |
 | `sagg wins` | Extract "breakthrough moments" - successful problem resolutions | Medium |
 | `sagg diff-replay` | Show file diffs that resulted from a session, linked to conversation | Low |
+| `sagg session-dna` | Create fingerprints for coding sessions so you can find when you've solved similar problems before | Medium |
+| `sagg benchmark` | Track which AI tools work best for different tasks in your codebase (speed, accuracy, cost per language/project type) | High |
 
 ### Nice-to-Have (Delightful)
 
@@ -1318,11 +1356,196 @@ analytics = [
 | `sagg changelog-assist` | Generate changelog from sessions in a date range | Medium |
 | `sagg context-cost` | Show which context (files, docs) consumes most tokens vs value | Medium |
 
-### Key Insight
+### High-Priority New Features (Detailed)
 
-The theme across the best ideas: **turning passive session storage into active knowledge retrieval**. The data is already there — the value is in surfacing it at the right moment.
+#### 16.1 `sagg init` - Setup wizard
 
-**Killer Feature**: `sagg oracle` - "You asked about rate limiting 3 times — here's what worked."
+**The problem**: Setting up sagg is annoying. You have to figure out where each AI tool stores its data, write config files, and hope you got the paths right.
+
+**What we'll build**: A setup command that finds your tools and writes the config for you.
+
+```bash
+$ sagg init
+
+Looking for AI tools...
+
+✅ Found Claude Code: ~/.claude/projects (567 sessions)
+✅ Found Cursor: ~/Library/Application Support/Cursor/... (89 sessions)
+✅ Found OpenCode: ~/.local/share/opencode/storage (1,234 sessions)
+❌ Codex: not installed
+❌ Ampcode: not found (need to install amp CLI)
+
+Enable Claude Code? [Y/n] Y
+Enable Cursor? [Y/n] Y
+Enable OpenCode? [Y/n] Y
+Custom paths? [y/N] N
+
+Created ~/.sagg/config.toml
+Run 'sagg collect' to import your sessions.
+```
+
+**How it works**:
+- Use the existing `isAvailable()` and `getDefaultPath()` adapter methods
+- Show what it found with session counts
+- Ask which ones to enable (default to yes for found tools)
+- Generate the config file
+- Set up the database
+
+#### 16.2 Session fingerprints - Find past solutions
+
+**The problem**: You solve the same authentication bug three times because you forgot about the previous solutions.
+
+**What we'll build**: "DNA" fingerprints for each session that let you find similar past work.
+
+**Session fingerprint**:
+```typescript
+interface SessionDNA {
+  intentHash: string;        // What problem were you solving?
+  filesSignature: string;    // What types of files did you touch?
+  toolSequence: string;      // What tools did you use in what order?
+  outcomeType: string;       // Did it work? fail? get abandoned?
+  complexityScore: number;   // How big was the change? (1-10)
+}
+```
+
+**Why this works**:
+- **Duplicate detection**: "You debugged JWT validation in auth.py two weeks ago"
+- **Solution reuse**: "Here's a session with 95% similar fingerprint that worked"
+- **Pattern recognition**: "You always use Claude for debugging, Cursor for UI work"
+- **Team knowledge**: "Sarah solved something similar - here's her approach"
+
+**Commands**:
+```bash
+$ sagg session-dna ses_abc123
+🧬 Fingerprint: auth_validation_7a8b9c2d
+   Problem: JWT token validation bug
+   Files: Python auth modules (3 files)
+   Tools: read→research→edit→test→debug
+   Result: Fixed (2 tries, 18 minutes)
+
+$ sagg similar --dna 7a8b9c2d
+Found 3 similar sessions:
+   ses_def456 (98% match) - "Fix token expiry" - worked on first try
+   ses_ghi789 (87% match) - "Auth middleware bug" - took 3 attempts
+   ses_jkl012 (82% match) - "JWT parsing error" - different approach
+```
+
+**Technical approach**:
+1. **Intent extraction**: Use embeddings to hash the problem description
+2. **File patterns**: Generate signature from file types and directory structure
+3. **Tool sequence**: Create normalized pattern of tool usage
+4. **Fast search**: Use LSH (Locality-Sensitive Hashing) to find similar fingerprints
+5. **Storage**: New table for session fingerprints with indexed components
+
+#### 16.3 AI tool benchmarking - Which tool works best?
+
+**The problem**: You have Claude, Cursor, Codex, and others. Which one should you use for Python debugging? React components? Nobody knows.
+
+**What we'll build**: Performance tracking that tells you which AI tool works best for different types of work in your codebase.
+
+**What we'll measure**:
+```typescript
+interface PerformanceData {
+  // Speed
+  timeToCompletion: number;          // Minutes from start to working solution
+  iterationsNeeded: number;          // How many back-and-forth rounds
+  acceptanceRate: number;            // % of suggestions you actually used
+
+  // Quality
+  successRate: number;               // % of tasks that actually got finished
+  bugRate: number;                   // How often the suggestion broke something
+  codeQuality: number;               // Did it improve or hurt the code?
+
+  // Cost
+  costPerTask: number;               // Dollar cost (tokens + tool fees)
+  tokenEfficiency: number;           // Useful changes per token spent
+
+  // Context
+  taskType: string;                  // bugfix, feature, refactor, docs
+  language: string;                  // python, javascript, go, etc
+  projectSize: number;               // How complex is this codebase?
+  developerSkill: string;            // junior, mid, senior
+}
+```
+
+**Database changes**:
+```sql
+-- Track every suggestion and what happened to it
+CREATE TABLE suggestion_events (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  tool_name TEXT,              -- claude-sonnet, cursor, codex
+  event_type TEXT,             -- suggested, accepted, rejected, edited
+  task_type TEXT,              -- bugfix, feature, refactor (auto-detected)
+  language TEXT,               -- from file extension
+  suggestion_size INTEGER,     -- lines or tokens
+  time_to_decision INTEGER,    -- seconds to accept/reject
+  timestamp INTEGER
+);
+
+-- Track task outcomes
+CREATE TABLE task_results (
+  task_id TEXT PRIMARY KEY,
+  session_id TEXT,
+  completed BOOLEAN,           -- Did you finish the task?
+  duration_minutes INTEGER,    -- Start to finish
+  attempts INTEGER,            -- How many tries did it take?
+  files_changed INTEGER,
+  tests_passed BOOLEAN,
+  cost_dollars DECIMAL(8,4),
+  created_at INTEGER
+);
+```
+
+**Output example**:
+```bash
+$ sagg benchmark --task-type bugfix --language python
+
+Python debugging performance (last 30 days, 47 tasks):
+
+Claude Sonnet:     ⭐⭐⭐⭐⭐ (best choice)
+├ Success rate:    94% (44/47 tasks completed)
+├ Average time:    12.3 minutes
+├ Acceptance rate: 87% (you used most suggestions)
+├ Average cost:    $0.45 per task
+└ Iterations:      2.1 tries per task
+
+Cursor:            ⭐⭐⭐⭐⚬
+├ Success rate:    89% (39/44 tasks)
+├ Average time:    18.7 minutes
+├ Acceptance rate: 71%
+├ Average cost:    $0.31 per task
+└ Iterations:      2.8 tries per task
+
+Recommendation: Use Claude Sonnet for Python bugs.
+34% faster than Cursor, higher success rate.
+$0.14 more expensive but saves 6.4 minutes per task.
+
+Confidence: High (47 tasks analyzed, statistically significant)
+```
+
+**Auto-routing**:
+```bash
+$ sagg route --prompt "Fix this auth bug in auth.py"
+Best tool: Claude Sonnet
+Predicted: 89% success, ~11 minutes, $0.43 cost
+Starting Claude session...
+```
+
+**Implementation steps**:
+1. **Event collection**: Track every suggestion, acceptance, rejection
+2. **Task detection**: Auto-classify what type of work is happening
+3. **Statistical analysis**: Calculate confidence intervals, handle bias
+4. **Recommendations**: Multi-factor scoring (speed + cost + quality)
+5. **Smart routing**: Real-time tool suggestions based on current context
+
+### What makes these features different
+
+Most session trackers just store data. These features actually help you code better.
+
+**The real value**: You've already got all this AI session data sitting around. Instead of just letting it pile up, use it to avoid repeating yourself and pick the right tool for each job.
+
+**Why this combination works**: `sagg init` gets you started quickly, session fingerprints help you reuse past solutions, and benchmarking tells you which AI tool actually works best for your code. Together they turn your session history into something useful.
 
 ---
 

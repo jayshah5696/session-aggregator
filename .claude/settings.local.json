@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(uv run:*)",
+      "Bash(uv pip install:*)",
+      "Bash(python3:*)",
+      "Bash(uv venv:*)",
+      "Bash(source:*)",
+      "Bash(pytest:*)",
+      "Bash(codex exec:*)",
+      "WebSearch",
+      "Bash(ls:*)",
+      "Skill(humanizer)"
+    ]
+  }
+}

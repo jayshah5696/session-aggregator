@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,9 +19,6 @@ from sagg.models import (
     UnifiedSession,
 )
 from sagg.storage.db import Database, get_default_db_path, get_sessions_dir
-
-if TYPE_CHECKING:
-    from datetime import datetime
 
 
 class SessionStoreError(Exception):
@@ -218,6 +216,7 @@ class SessionStore:
         self,
         source: str | None = None,
         project: str | None = None,
+        since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[UnifiedSession]:
@@ -226,6 +225,7 @@ class SessionStore:
         Args:
             source: Filter by source tool (opencode, claude, etc.).
             project: Filter by project path (partial match).
+            since: Only include sessions created after this datetime.
             limit: Maximum number of sessions to return.
             offset: Number of sessions to skip.
 
@@ -243,6 +243,10 @@ class SessionStore:
             conditions.append("(project_path LIKE ? OR project_name LIKE ?)")
             params.append(f"%{project}%")
             params.append(f"%{project}%")
+
+        if since is not None:
+            conditions.append("created_at >= ?")
+            params.append(int(since.timestamp()))
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 
@@ -280,6 +284,39 @@ class SessionStore:
             (query, limit),
         )
         return [self._row_to_session(row, include_content=False) for row in cursor]
+
+    def search_sessions_ranked(
+        self, query: str, limit: int = 50
+    ) -> list[tuple[UnifiedSession, float]]:
+        """Search sessions with relevance scores.
+
+        Uses FTS5 for matching and returns both the session and its relevance rank.
+        The rank is a negative number where more negative means better match.
+
+        Args:
+            query: Search query string.
+            limit: Maximum number of results.
+
+        Returns:
+            List of tuples containing (session, relevance_score).
+        """
+        cursor = self._db.execute(
+            """
+            SELECT s.*, fts.rank as relevance
+            FROM sessions s
+            JOIN sessions_fts fts ON s.rowid = fts.rowid
+            WHERE sessions_fts MATCH ?
+            ORDER BY fts.rank
+            LIMIT ?
+            """,
+            (query, limit),
+        )
+        results = []
+        for row in cursor:
+            session = self._row_to_session(row, include_content=True)
+            relevance = row["relevance"]
+            results.append((session, relevance))
+        return results
 
     def session_exists(self, source: str, source_id: str) -> bool:
         """Check if a session already exists.
@@ -344,6 +381,36 @@ class SessionStore:
             content_path.unlink()
 
         return True
+
+    def get_sessions_by_day(self, since: datetime) -> dict[str, dict]:
+        """Get session counts and token totals grouped by day.
+
+        Args:
+            since: Start datetime for the query.
+
+        Returns:
+            Dictionary mapping date strings to stats:
+            {
+                "2026-01-30": {"count": 5, "tokens": 45000},
+                "2026-01-29": {"count": 3, "tokens": 28000},
+                ...
+            }
+        """
+        cursor = self._db.execute(
+            """
+            SELECT date(created_at, 'unixepoch') as day,
+                   COUNT(*) as count,
+                   SUM(input_tokens + output_tokens) as tokens
+            FROM sessions
+            WHERE created_at >= ?
+            GROUP BY day
+            """,
+            (int(since.timestamp()),),
+        )
+        return {
+            row["day"]: {"count": row["count"], "tokens": row["tokens"] or 0}
+            for row in cursor
+        }
 
     def get_stats(self) -> dict:
         """Get aggregate statistics.
@@ -544,3 +611,124 @@ class SessionStore:
             turns.append(turn)
 
         return turns
+
+    def get_sync_state(self, source: str) -> dict | None:
+        """Get last sync timestamp and count for a source.
+
+        Args:
+            source: Source tool name (e.g., 'opencode', 'claude').
+
+        Returns:
+            Dictionary with 'last_sync_at' and 'session_count', or None if never synced.
+        """
+        cursor = self._db.execute(
+            "SELECT last_sync_at, session_count FROM sync_state WHERE source = ?",
+            (source,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "last_sync_at": row["last_sync_at"],
+            "session_count": row["session_count"],
+        }
+
+    def update_sync_state(self, source: str, sync_time: int, count: int) -> None:
+        """Update sync state after successful sync.
+
+        Args:
+            source: Source tool name.
+            sync_time: Unix timestamp of the sync.
+            count: Total number of sessions synced for this source.
+        """
+        self._db.execute(
+            """
+            INSERT OR REPLACE INTO sync_state (source, last_sync_at, session_count)
+            VALUES (?, ?, ?)
+            """,
+            (source, sync_time, count),
+        )
+        self._db.commit()
+
+    # Budget management methods
+
+    def set_budget(self, period: str, limit: int) -> None:
+        """Set a token budget for a period.
+
+        Args:
+            period: Budget period ('daily' or 'weekly').
+            limit: Token limit for the period.
+        """
+        now = int(time.time())
+        self._db.execute(
+            """
+            INSERT OR REPLACE INTO budgets (period, token_limit, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (period, limit, now),
+        )
+        self._db.commit()
+
+    def get_budget(self, period: str) -> int | None:
+        """Get the token budget for a period.
+
+        Args:
+            period: Budget period ('daily' or 'weekly').
+
+        Returns:
+            Token limit for the period, or None if not set.
+        """
+        cursor = self._db.execute(
+            "SELECT token_limit FROM budgets WHERE period = ?",
+            (period,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return row["token_limit"]
+
+    def clear_budget(self, period: str) -> None:
+        """Clear a token budget.
+
+        Args:
+            period: Budget period ('daily' or 'weekly').
+        """
+        self._db.execute("DELETE FROM budgets WHERE period = ?", (period,))
+        self._db.commit()
+
+    def get_usage_for_period(self, period: str) -> int:
+        """Get total token usage for a period.
+
+        Args:
+            period: Budget period ('daily' or 'weekly').
+
+        Returns:
+            Total tokens (input + output) used in the period.
+        """
+        from datetime import timezone
+
+        now = datetime.now(timezone.utc)
+
+        if period == "daily":
+            # Start of today (midnight UTC)
+            start_of_period = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "weekly":
+            # Start of week (Monday midnight UTC)
+            days_since_monday = now.weekday()
+            start_of_period = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_of_period = start_of_period - timedelta(days=days_since_monday)
+        else:
+            return 0
+
+        start_timestamp = int(start_of_period.timestamp())
+
+        cursor = self._db.execute(
+            """
+            SELECT COALESCE(SUM(input_tokens + output_tokens), 0) as total
+            FROM sessions
+            WHERE created_at >= ?
+            """,
+            (start_timestamp,),
+        )
+        row = cursor.fetchone()
+        return row["total"] if row else 0

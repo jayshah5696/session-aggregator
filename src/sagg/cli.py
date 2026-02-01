@@ -24,6 +24,48 @@ console = Console()
 error_console = Console(stderr=True)
 
 
+def parse_token_amount(s: str) -> int:
+    """Parse token amount string like '500k', '1M', '100000' to integer.
+
+    Supported formats:
+        Plain number: 100000 -> 100000
+        k/K suffix: 500k -> 500000
+        M/m suffix: 1M -> 1000000
+        Decimals: 2.5M -> 2500000
+
+    Args:
+        s: Token amount string (e.g., '500k', '1M', '100000')
+
+    Returns:
+        Integer token count.
+
+    Raises:
+        ValueError: If the format is invalid.
+    """
+    s = s.strip()
+    if not s:
+        raise ValueError("Empty token amount")
+
+    # Try matching with suffix (k, K, m, M)
+    match = re.match(r"^(\d+(?:\.\d+)?)([kKmM])$", s)
+    if match:
+        value = float(match.group(1))
+        suffix = match.group(2).lower()
+
+        if suffix == "k":
+            return int(value * 1000)
+        elif suffix == "m":
+            return int(value * 1000000)
+
+    # Try plain integer
+    try:
+        return int(s)
+    except ValueError:
+        pass
+
+    raise ValueError(f"Invalid token amount format: '{s}'. Use format like '500k', '1M', or '100000'")
+
+
 def parse_duration(s: str) -> timedelta:
     """Parse duration string like '7d', '2w', '1h' to timedelta.
 
@@ -654,6 +696,78 @@ def stats(group_by: str | None) -> None:
 
 
 @cli.command()
+@click.option("--weeks", "-w", type=int, default=12, help="Number of weeks to show")
+@click.option(
+    "--by",
+    "metric",
+    type=click.Choice(["sessions", "tokens"]),
+    default="sessions",
+    help="Metric to display (sessions or tokens)",
+)
+def heatmap(weeks: int, metric: str) -> None:
+    """Show activity heatmap (GitHub-style contributions)."""
+    from sagg.analytics.heatmap import (
+        get_activity_by_day,
+        generate_heatmap_data,
+        render_heatmap,
+        get_month_labels,
+    )
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        # Get activity data
+        activity = get_activity_by_day(store, weeks=weeks, metric=metric)
+
+        # Generate heatmap grid
+        data = generate_heatmap_data(activity, weeks=weeks)
+
+        # Get month labels for header
+        month_labels = get_month_labels(weeks)
+
+        # Build month header line
+        label_width = 6  # "  Sun " width
+        month_header = " " * label_width
+        prev_pos = 0
+        for pos, label in month_labels:
+            spaces_needed = pos - prev_pos
+            month_header += " " * spaces_needed + label
+            prev_pos = pos + len(label)
+
+        # Render heatmap
+        heatmap_output = render_heatmap(data, legend=True)
+
+        # Calculate summary stats
+        total_sessions = sum(activity.values()) if metric == "sessions" else 0
+        total_tokens = sum(activity.values()) if metric == "tokens" else 0
+        active_days = len(activity)
+
+        # Build title
+        metric_label = "sessions" if metric == "sessions" else "tokens"
+        title = f"Activity Heatmap (last {weeks} weeks, by {metric_label})"
+
+        # Create output with Rich
+        output_lines = [month_header, heatmap_output]
+
+        # Add summary
+        if metric == "sessions":
+            summary = f"\n  {total_sessions:,} sessions across {active_days} active days"
+        else:
+            summary = f"\n  {total_tokens:,} tokens across {active_days} active days"
+
+        output_lines.append(summary)
+
+        console.print(Panel("\n".join(output_lines), title=title, border_style="green"))
+
+    finally:
+        store.close()
+
+
+@cli.command()
 def sources() -> None:
     """List configured sources and their availability."""
     adapters = registry.list_adapters()
@@ -681,6 +795,99 @@ def sources() -> None:
         )
 
     console.print(table)
+
+
+@cli.command("git-link")
+@click.option("--project", "-p", type=str, help="Filter by project")
+@click.option("--update", "do_update", is_flag=True, help="Update session git info")
+@click.option("--since", type=str, help="Only sessions from last N days (e.g., 7d, 2w)")
+def git_link(project: str | None, do_update: bool, since: str | None) -> None:
+    """Associate sessions with git commits by timestamp proximity."""
+    from pathlib import Path
+
+    from sagg.git_utils import find_closest_commit, get_repo_info, is_git_repo
+    from sagg.models import GitContext
+
+    since_dt: datetime | None = None
+    if since:
+        try:
+            delta = parse_duration(since)
+            since_dt = datetime.now(timezone.utc) - delta
+        except ValueError as e:
+            error_console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        # Get sessions
+        sessions = store.list_sessions(project=project, limit=500)
+
+        # Filter by since if provided
+        if since_dt:
+            sessions = [s for s in sessions if s.updated_at >= since_dt]
+
+        if not sessions:
+            console.print("[dim]No sessions found.[/dim]")
+            return
+
+        # Build table
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Session", style="cyan", max_width=30)
+        table.add_column("Time", style="yellow")
+        table.add_column("Commit", style="green")
+        table.add_column("Message", style="white", max_width=40)
+
+        updated_count = 0
+
+        for session in sessions:
+            session_title = (session.title or "Untitled")[:30]
+            session_time = format_age(session.updated_at)
+
+            commit_sha = "[dim]---[/dim]"
+            commit_msg = "[dim]No project path[/dim]"
+
+            if session.project_path:
+                project_path = Path(session.project_path)
+
+                if project_path.exists() and is_git_repo(project_path):
+                    commit = find_closest_commit(project_path, session.updated_at)
+
+                    if commit:
+                        commit_sha = commit["sha"][:7]
+                        commit_msg = (commit["message"] or "")[:40]
+
+                        # Update session if requested
+                        if do_update and commit:
+                            # Get full session and update git context
+                            full_session = store.get_session(session.id)
+                            if full_session:
+                                repo_info = get_repo_info(project_path)
+                                full_session.git = GitContext(
+                                    branch=repo_info["branch"] if repo_info else None,
+                                    commit=commit["sha"],
+                                    remote=repo_info["remote"] if repo_info else None,
+                                )
+                                store.save_session(full_session)
+                                updated_count += 1
+                    else:
+                        commit_msg = "[dim]No matching commit[/dim]"
+                else:
+                    commit_msg = "[dim]Not a git repo[/dim]"
+
+            table.add_row(session_title, session_time, commit_sha, commit_msg)
+
+        console.print(table)
+
+        if do_update and updated_count > 0:
+            console.print(f"\n[green]Updated git info for {updated_count} session(s)[/green]")
+
+    finally:
+        store.close()
 
 
 @cli.command()
@@ -758,6 +965,848 @@ def summarize(days: int, project: str | None, detailed: bool) -> None:
                         console.print(f"  - Modified: {files_str}")
                 
                 console.print("") # spacing
+
+    finally:
+        store.close()
+
+
+@cli.command()
+@click.argument("query", required=False)
+@click.option("--session", "-s", type=str, help="Find sessions similar to this session ID")
+@click.option("--top", "-n", type=int, default=5, help="Number of results to show")
+def similar(query: str | None, session: str | None, top: int) -> None:
+    """Find similar sessions.
+
+    Find sessions similar to a query string or an existing session.
+
+    Examples:
+        sagg similar "implement authentication"
+        sagg similar --session abc123
+        sagg similar "fix login" --top 10
+    """
+    if not query and not session:
+        error_console.print("[red]Error:[/red] Provide a query or --session ID")
+        sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        from sagg.analytics.similar import find_similar_sessions
+
+        try:
+            results = find_similar_sessions(
+                store,
+                query=query,
+                session_id=session,
+                limit=top,
+            )
+        except ValueError as e:
+            error_console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
+
+        if not results:
+            if query:
+                console.print(f"[dim]No similar sessions found for '{query}'[/dim]")
+            else:
+                console.print(f"[dim]No similar sessions found for session '{session}'[/dim]")
+            return
+
+        # Build the display title
+        if query:
+            display_title = f'Similar Sessions to "{query[:50]}{"..." if len(query) > 50 else ""}"'
+        else:
+            # Get the source session title
+            source_session = store.get_session(session)  # type: ignore[arg-type]
+            if source_session and source_session.title:
+                display_title = f'Similar Sessions to "{source_session.title[:50]}"'
+            else:
+                display_title = f"Similar Sessions to {session}"
+
+        console.print(f"\n[bold]{display_title}[/bold]\n")
+
+        # Create a table for results
+        table = Table(
+            show_header=False,
+            box=None,
+            padding=(0, 1),
+            collapse_padding=True,
+        )
+        table.add_column("Rank", style="dim", width=4)
+        table.add_column("Details", style="white")
+
+        for i, result in enumerate(results, 1):
+            # Format similarity percentage
+            similarity_pct = int(result.score * 100)
+            if similarity_pct >= 70:
+                score_style = "green"
+            elif similarity_pct >= 40:
+                score_style = "yellow"
+            else:
+                score_style = "dim"
+
+            # Format matched terms
+            matched_terms_str = ", ".join(result.matched_terms[:5])
+            if len(result.matched_terms) > 5:
+                matched_terms_str += f" (+{len(result.matched_terms) - 5} more)"
+
+            # Build the detail lines
+            title_line = f"[bold]{result.title}[/bold] ([{score_style}]{similarity_pct}% similar[/{score_style}])"
+            project_line = f"[cyan]{result.project}[/cyan] [dim]•[/dim] [dim]{truncate_id(result.session_id, 12)}[/dim]"
+
+            details = f"{title_line}\n{project_line}"
+            if matched_terms_str:
+                details += f"\n[dim]Matched: {matched_terms_str}[/dim]"
+
+            table.add_row(f"{i}.", details)
+
+            # Add a blank row between results (except after the last one)
+            if i < len(results):
+                table.add_row("", "")
+
+        console.print(table)
+
+    finally:
+        store.close()
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--top", "-n", type=int, default=5, help="Number of results to show")
+@click.option("--verbose", "-v", is_flag=True, help="Show full snippets")
+def oracle(query: str, top: int, verbose: bool) -> None:
+    """Search your history: 'Have I solved this before?'
+
+    Semantic search over your session history to find past solutions.
+
+    Examples:
+        sagg oracle "rate limiting"
+        sagg oracle "fix TypeError"
+        sagg oracle "authentication" --top 10
+    """
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        from sagg.analytics.oracle import search_history
+
+        results = search_history(store, query, limit=top)
+
+        if not results:
+            console.print(f"[dim]No sessions found matching '{query}'[/dim]")
+            return
+
+        from rich.text import Text
+
+        console.print(f'[bold]Oracle: "{query}"[/bold]')
+        console.print(f"Found {len(results)} relevant session(s):\n")
+
+        for result in results:
+            # Calculate time ago
+            now = datetime.now(timezone.utc)
+            if result.timestamp.tzinfo is None:
+                timestamp = result.timestamp.replace(tzinfo=timezone.utc)
+            else:
+                timestamp = result.timestamp
+
+            delta = now - timestamp
+            seconds = delta.total_seconds()
+
+            if seconds < 3600:
+                time_ago = f"{int(seconds / 60)}m ago"
+            elif seconds < 86400:
+                time_ago = f"{int(seconds / 3600)}h ago"
+            elif seconds < 604800:
+                time_ago = f"{int(seconds / 86400)} days ago"
+            else:
+                time_ago = f"{int(seconds / 604800)} weeks ago"
+
+            # Format relevance as percentage
+            relevance_pct = int(result.relevance_score * 100)
+
+            # Build panel content
+            panel_content = Text()
+            panel_content.append(f"Project: {result.project}", style="green")
+            panel_content.append(" - ", style="dim")
+            panel_content.append(time_ago, style="yellow")
+            panel_content.append("\n\n")
+
+            # Truncate snippet for non-verbose mode
+            snippet = result.matched_text
+            if not verbose and len(snippet) > 150:
+                snippet = snippet[:150] + "..."
+
+            panel_content.append(f'"{snippet}"', style="italic")
+
+            # Create panel with title showing relevance
+            panel_title = f"Session: {result.title} ({relevance_pct}% match)"
+
+            console.print(
+                Panel(
+                    panel_content,
+                    title=panel_title,
+                    border_style="blue",
+                )
+            )
+            console.print()  # Spacing between panels
+
+    except Exception as e:
+        error_console.print(f"[red]Error searching:[/red] {e}")
+        sys.exit(1)
+    finally:
+        store.close()
+
+
+@cli.command()
+@click.option("--source", "-s", type=str, help="Sync specific source only")
+@click.option("--watch", "-w", is_flag=True, help="Watch for changes and sync continuously")
+@click.option("--dry-run", is_flag=True, help="Show what would be synced without saving")
+@click.option("--debounce", type=int, default=2000, help="Debounce interval in ms for watch mode")
+def sync(source: str | None, watch: bool, dry_run: bool, debounce: int) -> None:
+    """Sync sessions from sources (incremental).
+
+    Performs incremental sync, only importing new sessions since the last sync.
+
+    Examples:
+        sagg sync                    # One-time sync from all sources
+        sagg sync --source opencode  # Sync only from OpenCode
+        sagg sync --watch            # Watch for changes continuously
+        sagg sync --dry-run          # Preview what would be synced
+    """
+    from sagg.sync import SessionSyncer
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        # Get adapters (optionally filtered by source)
+        if source:
+            try:
+                adapter = registry.get_adapter(source)
+                adapters = [adapter]
+            except KeyError as e:
+                error_console.print(f"[red]Error:[/red] {e}")
+                sys.exit(1)
+        else:
+            adapters = registry.get_available_adapters()
+
+        if not adapters:
+            console.print("[yellow]No available adapters found.[/yellow]")
+            return
+
+        syncer = SessionSyncer(store, adapters)
+
+        if watch:
+            # Watch mode with continuous sync
+            _run_watch_mode(syncer, source, debounce, dry_run)
+        else:
+            # One-time sync
+            _run_sync_once(syncer, source, dry_run)
+
+    finally:
+        store.close()
+
+
+def _run_sync_once(syncer, source: str | None, dry_run: bool) -> None:
+    """Run a one-time sync operation."""
+    from rich.live import Live
+
+    mode_label = "[dim](dry run)[/dim] " if dry_run else ""
+    console.print(f"{mode_label}[bold]Syncing sessions...[/bold]")
+
+    results = syncer.sync_once(source=source, dry_run=dry_run)
+
+    if not results:
+        console.print("[yellow]No sources to sync.[/yellow]")
+        return
+
+    total_new = 0
+    total_skipped = 0
+
+    for src_name, result in results.items():
+        new_count = result.get("new", 0)
+        skipped_count = result.get("skipped", 0)
+        total_new += new_count
+        total_skipped += skipped_count
+
+        if new_count > 0:
+            console.print(f"  [green]+{new_count}[/green] new from [cyan]{src_name}[/cyan]")
+        elif skipped_count > 0:
+            console.print(f"  [dim]No new sessions from {src_name} ({skipped_count} already imported)[/dim]")
+        else:
+            console.print(f"  [dim]No sessions found from {src_name}[/dim]")
+
+    if dry_run:
+        console.print(f"\n[bold]{mode_label}Would sync {total_new} new session(s)[/bold]")
+    else:
+        console.print(f"\n[bold green]Synced {total_new} new session(s)[/bold green]")
+
+
+def _run_watch_mode(syncer, source: str | None, debounce: int, dry_run: bool) -> None:
+    """Run continuous watch mode."""
+    from rich.live import Live
+
+    mode_label = "[dim](dry run)[/dim] " if dry_run else ""
+    console.print(f"{mode_label}[bold]Watching for changes...[/bold] (Ctrl+C to stop)\n")
+
+    # Show which paths we're watching
+    paths = syncer.get_watch_paths(source)
+    for path in paths:
+        console.print(f"  [dim]Watching:[/dim] {path}")
+    console.print()
+
+    try:
+        for event in syncer.watch(source=source, debounce_ms=debounce):
+            timestamp = event.timestamp.strftime("%H:%M:%S")
+            if event.new_count > 0:
+                console.print(
+                    f"[dim][{timestamp}][/dim] [green]+[/green] Synced {event.new_count} session(s) from [cyan]{event.source}[/cyan]"
+                )
+            else:
+                console.print(
+                    f"[dim][{timestamp}][/dim] [dim]No new sessions from {event.source}[/dim]"
+                )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Watch mode stopped.[/yellow]")
+    except ImportError as e:
+        error_console.print(f"[red]Error:[/red] {e}")
+        error_console.print("Install watchfiles with: uv add watchfiles")
+        sys.exit(1)
+
+
+@cli.group()
+def bundle() -> None:
+    """Export and import session bundles for multi-machine sync."""
+    pass
+
+
+@bundle.command("export")
+@click.option("--output", "-o", type=click.Path(), required=True, help="Output bundle file path")
+@click.option("--since", type=str, help="Only sessions from last N days (e.g., 7d, 2w)")
+@click.option("--project", "-p", type=str, help="Filter by project name")
+@click.option("--source", "-s", type=str, help="Filter by source (opencode, claude, etc.)")
+def bundle_export(output: str, since: str | None, project: str | None, source: str | None) -> None:
+    """Export sessions to a portable bundle.
+
+    Creates a .sagg bundle file containing sessions that can be imported
+    on another machine.
+
+    Examples:
+        sagg bundle export -o my-sessions.sagg
+        sagg bundle export --since 7d -o weekly.sagg
+        sagg bundle export --project myapp -o myapp.sagg
+    """
+    from pathlib import Path
+
+    from sagg.bundle import export_bundle
+
+    since_dt: datetime | None = None
+    if since:
+        try:
+            delta = parse_duration(since)
+            since_dt = datetime.now(timezone.utc) - delta
+        except ValueError as e:
+            error_console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        output_path = Path(output)
+
+        # Add .sagg extension if not present
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".sagg")
+
+        console.print("Exporting sessions...")
+
+        count = export_bundle(
+            store,
+            output_path,
+            since=since_dt,
+            project=project,
+            source=source,
+        )
+
+        if count == 0:
+            console.print("[yellow]No sessions to export.[/yellow]")
+        else:
+            # Get file size
+            size_bytes = output_path.stat().st_size
+            if size_bytes >= 1024 * 1024:
+                size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+            elif size_bytes >= 1024:
+                size_str = f"{size_bytes / 1024:.1f} KB"
+            else:
+                size_str = f"{size_bytes} bytes"
+
+            console.print(f"[green]Created:[/green] {output_path} ({size_str})")
+            console.print(f"[green]Exported {count} session(s)[/green]")
+
+    except Exception as e:
+        error_console.print(f"[red]Error exporting bundle:[/red] {e}")
+        sys.exit(1)
+    finally:
+        store.close()
+
+
+@bundle.command("import")
+@click.argument("bundle_file", type=click.Path(exists=True))
+@click.option(
+    "--strategy",
+    type=click.Choice(["skip", "replace"]),
+    default="skip",
+    help="How to handle duplicates (default: skip)",
+)
+@click.option("--dry-run", is_flag=True, help="Preview without importing")
+@click.option("--verify", "verify_first", is_flag=True, help="Verify integrity before import")
+def bundle_import(
+    bundle_file: str, strategy: str, dry_run: bool, verify_first: bool
+) -> None:
+    """Import sessions from a bundle.
+
+    Imports sessions from a .sagg bundle file created on another machine
+    or as a backup.
+
+    Examples:
+        sagg bundle import my-sessions.sagg
+        sagg bundle import backup.sagg --dry-run
+        sagg bundle import team.sagg --verify --strategy replace
+    """
+    from pathlib import Path
+
+    from sagg.bundle import import_bundle, verify_bundle
+
+    bundle_path = Path(bundle_file)
+
+    # Verify integrity if requested
+    if verify_first:
+        console.print("Verifying bundle integrity...")
+        if not verify_bundle(bundle_path):
+            error_console.print("[red]Error:[/red] Bundle integrity check failed")
+            sys.exit(1)
+        console.print("[green]Bundle verified successfully[/green]")
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        if dry_run:
+            console.print("Previewing import (dry run)...")
+        else:
+            console.print("Importing sessions...")
+
+        result = import_bundle(
+            store,
+            bundle_path,
+            strategy=strategy,
+            dry_run=dry_run,
+        )
+
+        # Display results
+        if dry_run:
+            console.print(
+                f"Would import {result['imported']} session(s) "
+                f"({result['skipped']} duplicate(s) to skip)"
+            )
+        else:
+            console.print(
+                f"[green]Imported {result['imported']} session(s)[/green] "
+                f"(skipped {result['skipped']} duplicate(s))"
+            )
+
+        if result["errors"]:
+            error_console.print("[yellow]Warnings:[/yellow]")
+            for error in result["errors"]:
+                error_console.print(f"  - {error}")
+
+    except Exception as e:
+        error_console.print(f"[red]Error importing bundle:[/red] {e}")
+        sys.exit(1)
+    finally:
+        store.close()
+
+
+@bundle.command("verify")
+@click.argument("bundle_file", type=click.Path(exists=True))
+def bundle_verify(bundle_file: str) -> None:
+    """Verify bundle integrity.
+
+    Checks that the bundle file is not corrupted by verifying its checksum.
+
+    Example:
+        sagg bundle verify my-sessions.sagg
+    """
+    from pathlib import Path
+
+    from sagg.bundle import verify_bundle
+
+    bundle_path = Path(bundle_file)
+
+    console.print(f"Verifying {bundle_path}...")
+
+    if verify_bundle(bundle_path):
+        console.print("[green]Bundle integrity verified successfully[/green]")
+    else:
+        error_console.print("[red]Bundle integrity check failed[/red]")
+        sys.exit(1)
+
+
+@cli.command("friction-points")
+@click.option("--since", type=str, help="Only sessions from last N days (e.g., 7d, 2w)")
+@click.option("--threshold", type=int, default=3, help="Retry threshold for flagging")
+@click.option("--top", "-n", type=int, default=10, help="Number of results to show")
+def friction_points(since: str | None, threshold: int, top: int) -> None:
+    """Detect sessions with excessive friction.
+
+    Analyzes sessions for friction indicators including:
+    - High retry count: Same tool called many times in sequence
+    - Error ratio: High percentage of tool call errors
+    - Back-and-forth: Many short user corrections
+
+    Examples:
+        sagg friction-points
+        sagg friction-points --since 7d
+        sagg friction-points --threshold 5 --top 20
+    """
+    since_dt: datetime | None = None
+    if since:
+        try:
+            delta = parse_duration(since)
+            since_dt = datetime.now(timezone.utc) - delta
+        except ValueError as e:
+            error_console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        from sagg.analytics.friction import FrictionType, detect_friction_points
+
+        friction_list = detect_friction_points(
+            store,
+            since=since_dt,
+            retry_threshold=threshold,
+        )
+
+        if not friction_list:
+            time_desc = f" (last {since})" if since else ""
+            console.print(f"[dim]No friction points detected{time_desc}.[/dim]")
+            return
+
+        # Limit to top N
+        friction_list = friction_list[:top]
+
+        # Build title
+        time_desc = f"last {since}" if since else "all time"
+        console.print(f"[bold]Friction Points ({time_desc})[/bold]\n")
+
+        # Count by severity
+        high_count = sum(1 for fp in friction_list if fp.friction_score >= 0.6)
+        medium_count = sum(1 for fp in friction_list if 0.3 <= fp.friction_score < 0.6)
+
+        for fp in friction_list:
+            # Determine severity level and color
+            if fp.friction_score >= 0.6:
+                severity = "High Friction"
+                border_color = "red"
+            elif fp.friction_score >= 0.3:
+                severity = "Medium Friction"
+                border_color = "yellow"
+            else:
+                severity = "Low Friction"
+                border_color = "dim"
+
+            # Build panel title
+            panel_title = f"{severity}: {fp.title} (score: {fp.friction_score:.2f})"
+
+            # Build panel content
+            lines = []
+
+            # Project and age line
+            lines.append(
+                f"[dim]Project:[/dim] [cyan]{fp.project}[/cyan] "
+                f"[dim]-[/dim] [dim]{truncate_id(fp.session_id, 12)}[/dim]"
+            )
+            lines.append("")
+
+            # Friction indicators
+            for ftype in fp.friction_types:
+                if ftype == FrictionType.HIGH_RETRIES:
+                    retry_count = fp.details.get("retry_count", 0)
+                    retry_tools = fp.details.get("retry_tools", [])
+                    tools_str = ", ".join(retry_tools[:3])
+                    if len(retry_tools) > 3:
+                        tools_str += "..."
+                    lines.append(
+                        f"[yellow]![/yellow]  High retries: "
+                        f"{retry_count} sequential retries ({tools_str})"
+                    )
+
+                elif ftype == FrictionType.ERROR_RATE:
+                    error_rate = fp.details.get("error_rate", 0)
+                    lines.append(
+                        f"[yellow]![/yellow]  Error rate: "
+                        f"{int(error_rate * 100)}% of tool calls failed"
+                    )
+
+                elif ftype == FrictionType.BACK_AND_FORTH:
+                    count = fp.details.get("back_forth_count", 0)
+                    lines.append(f"[yellow]![/yellow]  Back-and-forth: {count} short corrections")
+
+                elif ftype == FrictionType.LOW_EFFICIENCY:
+                    lines.append("[yellow]![/yellow]  Low efficiency: Many tokens, little output")
+
+            # Add suggestion based on friction types
+            lines.append("")
+            if FrictionType.HIGH_RETRIES in fp.friction_types:
+                lines.append("[dim]Tip:[/dim] Consider breaking complex tasks into smaller steps")
+            elif FrictionType.BACK_AND_FORTH in fp.friction_types:
+                lines.append("[dim]Tip:[/dim] Try providing more context upfront")
+            elif FrictionType.ERROR_RATE in fp.friction_types:
+                lines.append("[dim]Tip:[/dim] Check command syntax before running")
+
+            console.print(
+                Panel(
+                    "\n".join(lines),
+                    title=panel_title,
+                    border_style=border_color,
+                )
+            )
+            console.print()  # Spacing between panels
+
+        # Summary
+        console.print(
+            f"[bold]Summary:[/bold] {high_count} high friction, "
+            f"{medium_count} medium friction session(s) found"
+        )
+
+    except Exception as e:
+        error_console.print(f"[red]Error analyzing sessions:[/red] {e}")
+        sys.exit(1)
+    finally:
+        store.close()
+
+
+@cli.group()
+def budget() -> None:
+    """Manage token budgets."""
+    pass
+
+
+@budget.command("set")
+@click.option("--weekly", type=str, help="Weekly token budget (e.g., 500k, 1M)")
+@click.option("--daily", type=str, help="Daily token budget (e.g., 100k)")
+def budget_set(weekly: str | None, daily: str | None) -> None:
+    """Set token budgets.
+
+    Examples:
+        sagg budget set --weekly 500k
+        sagg budget set --daily 100k
+        sagg budget set --weekly 1M --daily 200k
+    """
+    if not weekly and not daily:
+        error_console.print("[red]Error:[/red] Specify --weekly or --daily budget")
+        sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        if weekly:
+            try:
+                weekly_limit = parse_token_amount(weekly)
+                store.set_budget("weekly", weekly_limit)
+                console.print(f"[green]Set weekly budget:[/green] {weekly_limit:,} tokens")
+            except ValueError as e:
+                error_console.print(f"[red]Error:[/red] {e}")
+                sys.exit(1)
+
+        if daily:
+            try:
+                daily_limit = parse_token_amount(daily)
+                store.set_budget("daily", daily_limit)
+                console.print(f"[green]Set daily budget:[/green] {daily_limit:,} tokens")
+            except ValueError as e:
+                error_console.print(f"[red]Error:[/red] {e}")
+                sys.exit(1)
+
+    finally:
+        store.close()
+
+
+@budget.command("show")
+def budget_show() -> None:
+    """Show current budget usage.
+
+    Displays progress bars showing token usage vs. budget with color coding:
+    - Green: Below 80% usage
+    - Yellow: 80-95% usage (warning)
+    - Red: Above 95% usage (critical)
+    """
+    from rich.progress import BarColumn, Progress, TaskID, TextColumn
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        daily_budget = store.get_budget("daily")
+        weekly_budget = store.get_budget("weekly")
+
+        if daily_budget is None and weekly_budget is None:
+            console.print("[dim]No budgets set.[/dim]")
+            console.print("\nSet budgets with:")
+            console.print("  sagg budget set --daily 100k")
+            console.print("  sagg budget set --weekly 500k")
+            return
+
+        console.print("[bold]Token Budget Status[/bold]\n")
+
+        def get_color(percentage: float) -> str:
+            """Get color based on usage percentage."""
+            if percentage >= 95:
+                return "red"
+            elif percentage >= 80:
+                return "yellow"
+            else:
+                return "green"
+
+        def format_tokens(tokens: int) -> str:
+            """Format token count for display."""
+            if tokens >= 1000000:
+                return f"{tokens / 1000000:.1f}M"
+            elif tokens >= 1000:
+                return f"{tokens / 1000:.1f}k"
+            else:
+                return str(tokens)
+
+        if daily_budget is not None:
+            daily_usage = store.get_usage_for_period("daily")
+            daily_pct = (daily_usage / daily_budget) * 100 if daily_budget > 0 else 0
+            color = get_color(daily_pct)
+
+            # Build visual progress bar
+            bar_width = 40
+            filled = int((daily_pct / 100) * bar_width)
+            filled = min(filled, bar_width)  # Cap at 100%
+            bar = "[" + "=" * filled + " " * (bar_width - filled) + "]"
+
+            console.print(f"[bold]Daily Budget[/bold]")
+            console.print(
+                f"  [{color}]{bar}[/{color}] "
+                f"[{color}]{daily_pct:.1f}%[/{color}]"
+            )
+            console.print(
+                f"  [dim]Used:[/dim] {format_tokens(daily_usage)} / {format_tokens(daily_budget)}"
+            )
+            console.print()
+
+        if weekly_budget is not None:
+            weekly_usage = store.get_usage_for_period("weekly")
+            weekly_pct = (weekly_usage / weekly_budget) * 100 if weekly_budget > 0 else 0
+            color = get_color(weekly_pct)
+
+            # Build visual progress bar
+            bar_width = 40
+            filled = int((weekly_pct / 100) * bar_width)
+            filled = min(filled, bar_width)  # Cap at 100%
+            bar = "[" + "=" * filled + " " * (bar_width - filled) + "]"
+
+            console.print(f"[bold]Weekly Budget[/bold]")
+            console.print(
+                f"  [{color}]{bar}[/{color}] "
+                f"[{color}]{weekly_pct:.1f}%[/{color}]"
+            )
+            console.print(
+                f"  [dim]Used:[/dim] {format_tokens(weekly_usage)} / {format_tokens(weekly_budget)}"
+            )
+            console.print()
+
+        # Show alerts if approaching limits
+        alerts = []
+        if daily_budget is not None:
+            daily_usage = store.get_usage_for_period("daily")
+            daily_pct = (daily_usage / daily_budget) * 100 if daily_budget > 0 else 0
+            if daily_pct >= 95:
+                alerts.append("[red]! Daily budget nearly exhausted[/red]")
+            elif daily_pct >= 80:
+                alerts.append("[yellow]! Approaching daily budget limit[/yellow]")
+
+        if weekly_budget is not None:
+            weekly_usage = store.get_usage_for_period("weekly")
+            weekly_pct = (weekly_usage / weekly_budget) * 100 if weekly_budget > 0 else 0
+            if weekly_pct >= 95:
+                alerts.append("[red]! Weekly budget nearly exhausted[/red]")
+            elif weekly_pct >= 80:
+                alerts.append("[yellow]! Approaching weekly budget limit[/yellow]")
+
+        if alerts:
+            console.print("[bold]Alerts[/bold]")
+            for alert in alerts:
+                console.print(f"  {alert}")
+
+    finally:
+        store.close()
+
+
+@budget.command("clear")
+@click.option("--weekly", is_flag=True, help="Clear weekly budget")
+@click.option("--daily", is_flag=True, help="Clear daily budget")
+def budget_clear(weekly: bool, daily: bool) -> None:
+    """Clear token budgets.
+
+    If no flags specified, clears all budgets.
+
+    Examples:
+        sagg budget clear          # Clear all
+        sagg budget clear --daily  # Clear daily only
+        sagg budget clear --weekly # Clear weekly only
+    """
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        # If neither flag specified, clear both
+        if not weekly and not daily:
+            weekly = True
+            daily = True
+
+        if daily:
+            store.clear_budget("daily")
+            console.print("[green]Cleared daily budget[/green]")
+
+        if weekly:
+            store.clear_budget("weekly")
+            console.print("[green]Cleared weekly budget[/green]")
 
     finally:
         store.close()

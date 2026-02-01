@@ -7,7 +7,7 @@ from pathlib import Path
 from types import TracebackType
 
 # Schema version for migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 # SQL statements for schema creation
 SCHEMA_SQL = """
@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     models_json TEXT,
     files_modified_json TEXT,
     imported_at INTEGER NOT NULL,
+    origin_machine TEXT,
+    import_source TEXT,
     UNIQUE(source, source_id)
 );
 
@@ -60,6 +62,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+
+-- Sync state tracking for incremental sync
+CREATE TABLE IF NOT EXISTS sync_state (
+    source TEXT PRIMARY KEY,
+    last_sync_at INTEGER NOT NULL,
+    session_count INTEGER DEFAULT 0
+);
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -245,15 +254,74 @@ class Database:
 
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION, int(time.time())),
+                (1, int(time.time())),
             )
             conn.commit()
+            from_version = 1  # Update for subsequent migrations
 
-        # Future migrations would be handled here:
-        # if from_version < 2:
-        #     self._migrate_v1_to_v2()
-        # if from_version < 3:
-        #     self._migrate_v2_to_v3()
+        # Migration v1 -> v2: Add provenance tracking columns
+        if from_version < 2:
+            self._migrate_v1_to_v2()
+
+        # Migration v2 -> v3: Add budgets table
+        if from_version < 3:
+            self._migrate_v2_to_v3()
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Migrate schema from v1 to v2.
+
+        Adds provenance tracking columns for bundle import functionality:
+        - origin_machine: Machine ID where session was originally created
+        - import_source: Path to bundle file if imported
+        """
+        import time
+
+        conn = self.connect()
+
+        # Add new columns (SQLite doesn't support IF NOT EXISTS for columns)
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN origin_machine TEXT")
+        except Exception:
+            pass  # Column may already exist
+
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN import_source TEXT")
+        except Exception:
+            pass  # Column may already exist
+
+        # Record schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (2, int(time.time())),
+        )
+        conn.commit()
+
+    def _migrate_v2_to_v3(self) -> None:
+        """Migrate schema from v2 to v3.
+
+        Adds budgets table for token budget tracking.
+        """
+        import time
+
+        conn = self.connect()
+
+        # Create budgets table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY,
+                period TEXT NOT NULL,
+                token_limit INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(period)
+            )
+        """)
+
+        # Record schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (3, int(time.time())),
+        )
+        conn.commit()
 
     def check_fts_table_exists(self) -> bool:
         """Check if the FTS table exists.

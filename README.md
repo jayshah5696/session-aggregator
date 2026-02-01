@@ -11,6 +11,18 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 - **AgentTrace export**: Export to the [AgentTrace](https://agent-trace.dev) standard format
 - **Rich CLI**: Beautiful terminal output with Rich
 
+### New in v1.1
+
+- **`sagg sync --watch`**: Live filesystem watching for automatic session collection
+- **`sagg oracle`**: "Have I solved this before?" - semantic search through your history
+- **`sagg similar`**: Find sessions similar to a query using TF-IDF
+- **`sagg heatmap`**: GitHub-style contribution heatmap of your AI usage
+- **`sagg budget`**: Token budget tracking with visual alerts
+- **`sagg git-link`**: Associate sessions with git commits by timestamp
+- **`sagg friction-points`**: Detect sessions with excessive retries or errors
+- **`sagg bundle export/import`**: Portable session bundles for multi-machine sync
+- **Config file**: Customize paths and settings via `~/.sagg/config.toml`
+
 ## Supported Tools
 
 | Tool | Status | Path |
@@ -95,14 +107,24 @@ sagg list
 # Search for sessions
 sagg search "authentication"
 
+# "Have I solved this before?" - semantic history search
+sagg oracle "rate limiting"
+
 # Show session details
 sagg show <session-id>
+
+# View usage statistics and activity heatmap
+sagg stats
+sagg heatmap
 
 # Export to AgentTrace format
 sagg export <session-id> --agenttrace
 
-# View usage statistics
-sagg stats
+# Set a weekly token budget
+sagg budget set --weekly 500k
+
+# Watch for new sessions in real-time
+sagg sync --watch
 ```
 
 ## Terminal UI (TUI)
@@ -277,6 +299,132 @@ sagg stats --by model
 sagg stats --by source
 ```
 
+### `sagg sync`
+
+Incremental sync with optional live watching.
+
+```bash
+# One-time incremental sync
+sagg sync
+
+# Watch for changes continuously
+sagg sync --watch
+
+# Sync specific source only
+sagg sync --source opencode
+
+# Preview what would be synced
+sagg sync --dry-run
+```
+
+### `sagg oracle`
+
+Search your history: "Have I solved this before?"
+
+```bash
+# Find sessions related to a query
+sagg oracle "rate limiting"
+
+# Limit results
+sagg oracle "authentication" --top 5
+
+# Show full snippets
+sagg oracle "fix TypeError" --verbose
+```
+
+### `sagg similar`
+
+Find sessions similar to a query or another session.
+
+```bash
+# Find similar by query
+sagg similar "implement authentication"
+
+# Find similar to an existing session
+sagg similar --session <session-id>
+
+# Limit results
+sagg similar "API design" --top 10
+```
+
+### `sagg heatmap`
+
+Display a GitHub-style activity heatmap.
+
+```bash
+# Show last 12 weeks (default)
+sagg heatmap
+
+# Custom time range
+sagg heatmap --weeks 24
+
+# Color by token usage instead of session count
+sagg heatmap --by tokens
+```
+
+### `sagg budget`
+
+Token budget tracking with alerts.
+
+```bash
+# Set budgets
+sagg budget set --weekly 500k
+sagg budget set --daily 100k
+
+# Show current usage vs budget
+sagg budget show
+
+# Clear budgets
+sagg budget clear --weekly
+```
+
+### `sagg git-link`
+
+Associate sessions with git commits.
+
+```bash
+# Show sessions with linked commits
+sagg git-link
+
+# Filter by project
+sagg git-link --project myapp
+
+# Update session git info
+sagg git-link --update
+```
+
+### `sagg friction-points`
+
+Detect sessions with excessive back-and-forth.
+
+```bash
+# Show friction points
+sagg friction-points
+
+# Filter by time
+sagg friction-points --since 7d
+
+# Custom retry threshold
+sagg friction-points --threshold 5
+```
+
+### `sagg bundle`
+
+Export and import portable session bundles.
+
+```bash
+# Export sessions to bundle
+sagg bundle export -o my-sessions.sagg
+sagg bundle export --since 7d --project myapp -o weekly.sagg
+
+# Import from bundle
+sagg bundle import my-sessions.sagg
+sagg bundle import backup.sagg --dry-run
+
+# Verify bundle integrity
+sagg bundle verify my-sessions.sagg
+```
+
 ## Data Storage
 
 Session data is stored in `~/.sagg/`:
@@ -376,34 +524,38 @@ uv run pytest
 session-aggregator/
 ├── pyproject.toml          # Project configuration
 ├── README.md               # This file
-├── research.md             # Research findings
 ├── spec.md                 # Technical specification
-├── todo.md                 # Progress tracking
 ├── src/sagg/
 │   ├── __init__.py         # Package exports
 │   ├── cli.py              # CLI commands (Click)
 │   ├── models.py           # Pydantic data models
-│   ├── adapters/
-│   │   ├── __init__.py     # Adapter registry
-│   │   ├── base.py         # Base adapter interface
+│   ├── config.py           # Configuration management
+│   ├── sync.py             # Session synchronization
+│   ├── bundle.py           # Export/import bundles
+│   ├── git_utils.py        # Git integration utilities
+│   ├── adapters/           # Source tool adapters
 │   │   ├── opencode.py     # OpenCode adapter
 │   │   ├── claude.py       # Claude Code adapter
 │   │   ├── codex.py        # Codex CLI adapter
 │   │   ├── cursor.py       # Cursor adapter
 │   │   └── ampcode.py      # Ampcode adapter
-│   ├── storage/
-│   │   ├── __init__.py     # Storage exports
+│   ├── storage/            # Data persistence
 │   │   ├── db.py           # Database management
 │   │   └── store.py        # Session store
-│   ├── export/
-│   │   ├── __init__.py     # Export exports
-│   │   └── agenttrace.py   # AgentTrace exporter
-│   └── tui/
-│       ├── __init__.py     # TUI exports
+│   ├── export/             # Export formats
+│   │   ├── agenttrace.py   # AgentTrace exporter
+│   │   └── markdown.py     # Markdown exporter
+│   ├── analytics/          # Analysis features
+│   │   ├── oracle.py       # History search
+│   │   ├── similar.py      # Similarity matching
+│   │   ├── friction.py     # Friction detection
+│   │   └── heatmap.py      # Activity heatmap
+│   ├── security/           # Data protection
+│   │   └── scrubber.py     # Sensitive data redaction
+│   └── tui/                # Terminal UI
 │       ├── app.py          # Main Textual app
-│       ├── styles.tcss     # Textual CSS styling
 │       └── widgets/        # UI components
-└── tests/                  # Test files
+└── tests/                  # Test files (170+ tests)
 ```
 
 ## License
