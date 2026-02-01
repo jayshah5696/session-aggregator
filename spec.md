@@ -853,6 +853,47 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 
 ---
 
+
+### 9.3 Distribution & Installation Strategy
+
+**Goals**
+- One-liner install across macOS, Linux, and Windows
+- No system Python pollution (isolated env)
+- Simple upgrades and uninstalls
+- Deterministic versioning and checksums
+
+**Primary (all OS)**
+- Publish `sagg` to PyPI (pure-Python wheel).
+- Recommended commands:
+  - `uv tool install sagg` (preferred)
+  - `pipx install sagg` (fallback)
+- Upgrade: `uv tool upgrade sagg` / `pipx upgrade sagg`
+- Uninstall: `uv tool uninstall sagg` / `pipx uninstall sagg`
+
+**Bootstrap scripts**
+- `install.sh` for macOS/Linux:
+  - Detect OS/arch
+  - Ensure `uv` (install if missing)
+  - `uv tool install sagg`
+  - Print PATH hints if `~/.local/bin` not on PATH
+- `install.ps1` for Windows:
+  - Ensure `uv` or `pipx`
+  - `uv tool install sagg` (preferred) or `pipx install sagg`
+  - Print PATH hints for user bin location
+
+**Package-manager convenience (optional)**
+- Homebrew tap for macOS/Linux:
+  - `brew install <tap>/sagg`
+  - Formula wraps `pipx` or `uv tool install` to keep logic consistent
+- Scoop or winget manifests for Windows when demand justifies
+
+**Release pipeline**
+1. Tag version `vX.Y.Z`
+2. Build sdist + wheel (py3-none-any)
+3. Publish to PyPI + GitHub Release
+4. Update Homebrew/Scoop manifests
+5. Update installer scripts with latest version + checksums
+
 ## 10. Open Questions
 
 1. **Antigravity format**: Need access to actual session files to reverse-engineer format
