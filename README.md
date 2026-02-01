@@ -43,7 +43,7 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/session-aggregator.git
+git clone https://github.com/jayshah5696/session-aggregator.git
 cd session-aggregator
 
 # Install with uv (for development)
