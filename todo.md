@@ -9,6 +9,21 @@
 
 ## Progress Log
 
+### 2026-02-05
+
+#### Completed
+- [x] `sagg analyze-sessions` command — heuristic analyzer (zero-cost, no LLM needed)
+- [x] `sagg analyze-sessions --analyzer llm` — LLM analyzer via CLI tools (`claude -p`, `codex`, `gemini`)
+- [x] `sagg insights` command — cross-tool usage insights CLI report
+- [x] `SessionFacet` Pydantic model + 15 supporting report models
+- [x] DB migration v3→v4 (session_facets + insights_cache tables)
+- [x] 6 new SessionStore methods (upsert_facet, get_facets, get_unfaceted_sessions, etc.)
+- [x] Aggregation pipeline (tool comparison, friction analysis, trends, AGENTS.md suggestions)
+- [x] 87 new tests (heuristic: 29, store: 21, aggregator: 37)
+- [x] Bug fix: task classifier substring match (`"bug" in "debug"` → check debug first)
+- [x] spec.md §13.7 full specification for insights feature
+- [x] Inspired by Claude Code's `/insights` — extended for multi-tool analysis
+
 ### 2026-02-01
 
 #### Completed

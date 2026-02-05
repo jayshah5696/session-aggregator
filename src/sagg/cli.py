@@ -1812,6 +1812,363 @@ def budget_clear(weekly: bool, daily: bool) -> None:
         store.close()
 
 
+@cli.command("analyze-sessions")
+@click.option("--since", type=str, default="30d", help="Analyze sessions from last N (e.g., 7d, 30d)")
+@click.option("--source", "-s", type=str, help="Filter by source tool")
+@click.option("--project", "-p", type=str, help="Filter by project")
+@click.option("--force", is_flag=True, help="Re-analyze sessions that already have facets")
+@click.option(
+    "--analyzer",
+    type=click.Choice(["heuristic", "llm"]),
+    default="heuristic",
+    help="Analysis method (default: heuristic)",
+)
+@click.option("--llm-cli", type=str, help="Which CLI for LLM (claude, codex, gemini). Auto-detects if omitted.")
+@click.option("--dry-run", is_flag=True, help="Show what would be analyzed")
+@click.option("--verbose", "-v", is_flag=True, help="Show per-session results")
+def analyze_sessions(
+    since: str,
+    source: str | None,
+    project: str | None,
+    force: bool,
+    analyzer: str,
+    llm_cli: str | None,
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Extract structured facets from sessions for insights analysis.
+
+    Analyzes each session and stores a structured "facet" containing
+    goal, outcome, friction, and tool effectiveness data.
+
+    Examples:
+        sagg analyze-sessions                    # Heuristic, last 30 days
+        sagg analyze-sessions --analyzer llm     # Use LLM via CLI tool
+        sagg analyze-sessions --since 7d --force # Re-analyze last week
+    """
+    try:
+        delta = parse_duration(since)
+        since_dt = datetime.now(timezone.utc) - delta
+    except ValueError as e:
+        error_console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        # Get sessions to analyze
+        if force:
+            sessions = store.list_sessions(source=source, project=project, since=since_dt, limit=5000)
+        else:
+            sessions = store.get_unfaceted_sessions(since=since_dt, source=source, limit=5000)
+            if project:
+                sessions = [s for s in sessions if project.lower() in (s.project_name or "").lower()]
+
+        if not sessions:
+            console.print("[dim]No sessions to analyze.[/dim]")
+            return
+
+        if dry_run:
+            console.print(f"[bold]Would analyze {len(sessions)} session(s) ({analyzer})[/bold]")
+            for s in sessions[:10]:
+                console.print(f"  {s.source.value:10s} {(s.title or 'Untitled')[:50]}")
+            if len(sessions) > 10:
+                console.print(f"  [dim]... and {len(sessions) - 10} more[/dim]")
+            return
+
+        console.print(f"[bold]Analyzing {len(sessions)} session(s) ({analyzer})...[/bold]")
+
+        # Check LLM availability if needed
+        if analyzer == "llm":
+            from sagg.analytics.insights.cli_llm import detect_available_backend
+
+            backend = llm_cli or detect_available_backend()
+            if backend is None:
+                error_console.print(
+                    "[red]Error:[/red] No LLM CLI tool found. "
+                    "Install claude, codex, or gemini CLI, or use --analyzer heuristic"
+                )
+                sys.exit(1)
+            console.print(f"[dim]Using LLM backend: {backend}[/dim]")
+
+        analyzed = 0
+        errors = 0
+
+        for session in sessions:
+            try:
+                # Load full session content
+                full_session = store.get_session(session.id)
+                if full_session is None:
+                    continue
+
+                if analyzer == "llm":
+                    from sagg.analytics.insights.cli_llm import analyze_session_llm
+
+                    facet_data = analyze_session_llm(full_session, backend_name=llm_cli)
+                else:
+                    from sagg.analytics.insights.heuristic import analyze_session
+
+                    facet_data = analyze_session(full_session)
+
+                store.upsert_facet(facet_data)
+                analyzed += 1
+
+                if verbose:
+                    console.print(
+                        f"  [green]+[/green] {facet_data['task_type']:12s} "
+                        f"{facet_data['outcome']:20s} "
+                        f"friction={facet_data['friction_score']:.2f}  "
+                        f"{(facet_data['brief_summary'] or '')[:50]}"
+                    )
+
+            except Exception as e:
+                errors += 1
+                if verbose:
+                    error_console.print(f"  [red]![/red] Failed: {session.id[:12]} - {e}")
+
+        console.print(f"\n[bold green]Analyzed {analyzed} session(s)[/bold green]", end="")
+        if errors:
+            console.print(f" [yellow]({errors} errors)[/yellow]")
+        else:
+            console.print()
+
+    finally:
+        store.close()
+
+
+@cli.command()
+@click.option("--since", type=str, default="30d", help="Time range (e.g., 7d, 30d)")
+@click.option("--source", "-s", type=str, multiple=True, help="Filter by source (repeatable)")
+@click.option("--project", "-p", type=str, help="Filter by project")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["cli", "json", "html"]),
+    default="cli",
+    help="Output format",
+)
+@click.option("--output", "-o", type=click.Path(), help="Save report to file")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed breakdowns")
+def insights(
+    since: str,
+    source: tuple[str, ...],
+    project: str | None,
+    output_format: str,
+    output: str | None,
+    verbose: bool,
+) -> None:
+    """Generate cross-tool usage insights report.
+
+    Aggregates session facets into a comprehensive report showing
+    tool comparison, friction patterns, and recommendations.
+
+    Run 'sagg analyze-sessions' first to extract facets.
+
+    Examples:
+        sagg insights                           # CLI summary
+        sagg insights --format json -o report.json
+        sagg insights --source claude --source cursor
+    """
+    try:
+        delta = parse_duration(since)
+        since_dt = datetime.now(timezone.utc) - delta
+    except ValueError as e:
+        error_console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        store = SessionStore()
+    except Exception as e:
+        error_console.print(f"[red]Error initializing store:[/red] {e}")
+        sys.exit(1)
+
+    try:
+        # Get facets
+        facets = []
+        if source:
+            for s in source:
+                facets.extend(store.get_facets(source=s, since=since_dt, project=project))
+        else:
+            facets = store.get_facets(since=since_dt, project=project)
+
+        if not facets:
+            console.print("[yellow]No facets found. Run 'sagg analyze-sessions' first.[/yellow]")
+            return
+
+        # Get stats
+        stats = store.get_stats()
+
+        # Generate report
+        from sagg.analytics.insights.aggregator import generate_insights
+
+        report = generate_insights(
+            facets=facets,
+            stats=stats,
+            range_start=since_dt,
+            range_end=datetime.now(timezone.utc),
+        )
+
+        # Output
+        if output_format == "json":
+            import json
+
+            json_output = json.dumps(report, indent=2, default=str)
+            if output:
+                with open(output, "w") as f:
+                    f.write(json_output)
+                console.print(f"[green]Report saved to {output}[/green]")
+            else:
+                console.print(json_output)
+
+        elif output_format == "html":
+            console.print("[yellow]HTML export coming soon. Use --format json for now.[/yellow]")
+
+        else:
+            # CLI output
+            _print_insights_cli(report, verbose=verbose)
+
+    finally:
+        store.close()
+
+
+def _print_insights_cli(report: dict, verbose: bool = False) -> None:
+    """Print insights report as rich CLI output."""
+    glance = report.get("at_a_glance", {})
+    tool_comp = report.get("tool_comparison", {})
+    friction = report.get("friction_analysis", {})
+    trends = report.get("trends", {})
+    suggestions = report.get("suggestions", {})
+    areas = report.get("project_areas", [])
+    workflows = report.get("impressive_workflows", [])
+    fun = report.get("fun_ending", {})
+
+    total = report.get("total_facets", 0)
+    tools = tool_comp.get("tools_analyzed", [])
+
+    # Header
+    console.print()
+    console.print("[bold]Session Insights[/bold]", end="")
+    console.print(f"  [dim]{total} sessions analyzed[/dim]", end="")
+    if tools:
+        tool_counts = tool_comp.get("sessions_per_tool", {})
+        tool_str = " · ".join(f"{t} ({tool_counts.get(t, 0)})" for t in tools)
+        console.print(f"  [dim]{tool_str}[/dim]")
+    else:
+        console.print()
+
+    console.print()
+
+    # At a Glance
+    if glance.get("whats_working"):
+        console.print(Panel(
+            f"[bold]Working:[/bold] {glance['whats_working']}\n\n"
+            f"[bold]Hindering:[/bold] {glance.get('whats_hindering', '')}\n\n"
+            f"[bold]Quick win:[/bold] {glance.get('quick_wins', '')}",
+            title="At a Glance",
+            border_style="yellow",
+        ))
+
+    # Tool Comparison
+    metrics = tool_comp.get("tool_metrics", [])
+    if metrics:
+        tool_table = Table(show_header=True, header_style="bold", title="Cross-Tool Comparison")
+        tool_table.add_column("Tool", style="cyan")
+        tool_table.add_column("Sessions", justify="right")
+        tool_table.add_column("Success", justify="right")
+        tool_table.add_column("Friction", justify="right")
+        tool_table.add_column("Best For", style="dim")
+
+        best_for = tool_comp.get("best_for", {})
+
+        for m in metrics:
+            tool_name = m["tool"]
+            best_tasks = [t for t, tool in best_for.items() if tool == tool_name]
+            best_str = ", ".join(best_tasks[:2]) if best_tasks else "—"
+
+            # Color success rate
+            success_pct = f"{m['success_rate']:.0%}"
+            if m["success_rate"] >= 0.8:
+                success_pct = f"[green]{success_pct}[/green]"
+            elif m["success_rate"] >= 0.6:
+                success_pct = f"[yellow]{success_pct}[/yellow]"
+            else:
+                success_pct = f"[red]{success_pct}[/red]"
+
+            tool_table.add_row(
+                tool_name,
+                str(m["session_count"]),
+                success_pct,
+                f"{m['avg_friction_score']:.2f}",
+                best_str,
+            )
+
+        console.print(tool_table)
+        console.print()
+
+    # Friction
+    if friction.get("top_friction_patterns"):
+        console.print("[bold]Top Friction Patterns[/bold]")
+        for p in friction["top_friction_patterns"][:5]:
+            cat = p["category"].replace("_", " ").title()
+            console.print(f"  [yellow]![/yellow] {cat} ({p['count']}x)")
+        console.print()
+
+    # Project Areas (verbose only)
+    if verbose and areas:
+        console.print("[bold]Project Areas[/bold]")
+        for area in areas[:5]:
+            console.print(
+                f"  [cyan]{area['name']}[/cyan] ({area['session_count']} sessions, "
+                f"{area['success_rate']:.0%} success)"
+            )
+        console.print()
+
+    # Impressive workflows (verbose only)
+    if verbose and workflows:
+        console.print("[bold]Impressive Workflows[/bold]")
+        for w in workflows:
+            console.print(f"  [green]★[/green] {w['title']}")
+            if w.get("description"):
+                console.print(f"    [dim]{w['description'][:80]}[/dim]")
+        console.print()
+
+    # Suggestions
+    agents_md = suggestions.get("agents_md_additions", [])
+    if agents_md:
+        console.print("[bold]Suggested AGENTS.md Additions[/bold]")
+        for s in agents_md[:5]:
+            console.print(f"  [{s['target_file']}] {s['addition'][:80]}")
+            console.print(f"  [dim]Why: {s['why']}[/dim]")
+            console.print()
+
+    # Tool recommendations
+    recs = suggestions.get("tool_recommendations", [])
+    if recs:
+        console.print("[bold]Tool Recommendations[/bold]")
+        for r in recs[:5]:
+            confidence = f"{'●' * int(r['confidence'] * 5)}{'○' * (5 - int(r['confidence'] * 5))}"
+            console.print(f"  {r['task_type']:20s} → [cyan]{r['recommended_tool']}[/cyan]  [{confidence}]")
+        console.print()
+
+    # Trends
+    console.print(
+        f"[dim]Friction trend: {trends.get('friction_trend', 'stable')} · "
+        f"Productivity trend: {trends.get('productivity_trend', 'stable')}[/dim]"
+    )
+
+    # Fun ending
+    if fun.get("headline"):
+        console.print()
+        console.print(Panel(
+            f"[bold]{fun['headline']}[/bold]\n[dim]{fun.get('detail', '')}[/dim]",
+            border_style="yellow",
+        ))
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     cli()

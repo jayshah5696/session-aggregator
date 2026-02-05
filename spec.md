@@ -936,7 +936,11 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 - [ ] TUI analytics dashboard with visualizations (pending)
 - [ ] `sagg skill-suggestions` - Auto-generate skills (pending)
 
-### v1.3 - PLANNED (Smart features)
+### v1.3 - IN PROGRESS (Insights & Smart Features)
+- [x] `sagg analyze-sessions` - Extract per-session facets via heuristic or LLM (§13.7) — Implemented Feb 5, 2026
+- [x] `sagg insights` - Cross-tool usage insights CLI report (§13.7) — Implemented Feb 5, 2026
+- [ ] `sagg insights --format html` - HTML export for insights report (§13.7)
+- [ ] `sagg insights` TUI view - Tabbed Textual interface with drill-down (§13.7)
 - [ ] `sagg init` - setup wizard that detects your tools
 - [ ] Tool benchmarking - track which AI works best for what
 - [ ] `sagg benchmark` - get recommendations based on your actual usage
@@ -1356,6 +1360,821 @@ CREATE TABLE summary_sessions (
 **Dependencies**:
 *   `langchain-core` (for prompt management/chaining, lightweight)
 *   `openai` or `anthropic` SDKs
+
+---
+
+### 13.7 `sagg insights` - Cross-Tool Usage Insights Report
+
+**Status**: Planned
+**Inspired by**: Claude Code's `/insights` command (analyzed February 2026)
+**Key differentiator**: Cross-tool analysis across Claude, Cursor, OpenCode, Codex, Gemini CLI — not locked to one tool
+
+#### The Problem
+
+Claude Code has a built-in `/insights` command that analyzes session history and generates an HTML report with friction analysis, interaction patterns, and suggestions. But it only sees Claude Code sessions. Developers using multiple AI tools have no unified view of their productivity patterns, friction points, or tool effectiveness across all their AI-assisted coding.
+
+#### How Claude Code Does It Internally (Reference Architecture)
+
+Claude Code's insights pipeline has three layers. We replicate and extend this for multi-tool:
+
+```
+Claude Code Architecture (single-tool, for reference):
+──────────────────────────────────────────────────────
+Layer 1: Raw JSONL session logs
+  ~/.claude/projects/<path>/<uuid>.jsonl
+  Each line = event (user msg, assistant response, tool call, file snapshot)
+  Fields: uuid, timestamp, sessionId, type, message, usage
+
+Layer 2: Per-session facets (LLM-generated)
+  ~/.claude/usage-data/facets/<sessionId>.json
+  An LLM reads each transcript and classifies:
+    underlying_goal, goal_categories, outcome,
+    friction_counts, claude_helpfulness, session_type,
+    primary_success, brief_summary
+
+Layer 3: Aggregated report
+  ~/.claude/stats-cache.json → daily stats, token counts, model usage
+  ~/.claude/usage-data/report.html → charts + narrative sections
+
+Key insight: Facets are LLM-generated. Claude Code sends each session
+transcript to a model that classifies goals, friction, outcomes, and
+satisfaction. Then it aggregates across all facets to find patterns.
+```
+
+**Claude Code Facet Schema (what each per-session analysis looks like):**
+
+```json
+{
+  "underlying_goal": "Create a centralized documentation system...",
+  "goal_categories": {
+    "documentation_organization": 1,
+    "spec_implementation": 1
+  },
+  "outcome": "partially_achieved",
+  "user_satisfaction_counts": { "likely_satisfied": 1 },
+  "claude_helpfulness": "moderately_helpful",
+  "session_type": "multi_task",
+  "friction_counts": {
+    "user_rejected_action": 2,
+    "wrong_approach": 1
+  },
+  "friction_detail": "User interrupted Claude twice when it tried to use subagents...",
+  "primary_success": "multi_file_changes",
+  "brief_summary": "User wanted to consolidate documentation and implement...",
+  "session_id": "87bf08fb-fedf-4253-9c27-1541f25ef028"
+}
+```
+
+**Claude Code Report Sections (10 sections in the HTML report):**
+
+| # | Section | Content | Charts |
+|---|---------|---------|--------|
+| 1 | At a Glance | Yellow card: working / hindering / quick wins / ambitious | — |
+| 2 | What You Work On | Project areas with session counts | Goal bars, tool usage bars, language bars, session type bars |
+| 3 | How You Use CC | Narrative about interaction style + key pattern callout | Response time histogram, time-of-day histogram, multi-clauding stats, tool errors |
+| 4 | Impressive Things | Top 3 workflows that went well | "What helped most" bars, outcomes bars |
+| 5 | Where Things Go Wrong | Friction categories with examples | Friction type bars, satisfaction bars |
+| 6 | Features to Try | CLAUDE.md additions + feature cards with copyable code | — |
+| 7 | New Usage Patterns | Pattern cards with copyable prompts | — |
+| 8 | On the Horizon | Purple cards with ambitious future workflow ideas | — |
+| 9 | Team Feedback | Collapsible (often empty) | — |
+| 10 | Fun Ending | Humorous headline from session history | — |
+
+#### sagg Architecture (Multi-Tool Extension)
+
+```
+sagg insights pipeline:
+────────────────────────
+Layer 1: Already done — sagg collect normalizes all tools to UnifiedSession
+  Adapters: Claude, OpenCode, Cursor, Codex, Gemini CLI, Ampcode
+  Storage: ~/.sagg/db.sqlite + ~/.sagg/sessions/<source>/<id>.jsonl
+
+Layer 2: NEW — session_facets table in existing SQLite
+  sagg analyze-sessions reads each session, extracts structured facets
+  via LLM (preferred) or heuristic classifier (fallback)
+  LLM backend: shell out to claude -p / codex / gemini CLI (no SDK deps)
+
+Layer 3: NEW — sagg insights aggregates facets + existing stats
+  Cross-tool comparison, friction patterns, tool recommendations
+  Primary output: TUI (Textual) with tabbed layout + drill-down
+  Export: --format html for sharing, --format json for scripting
+```
+
+#### Our Facet Schema (Extended for Multi-Tool)
+
+```python
+class SessionFacet(BaseModel):
+    """AI-extracted or heuristic-extracted analysis of a single session."""
+
+    # Identity
+    session_id: str
+    source: SourceTool                     # Which tool (claude, cursor, opencode, etc.)
+    analyzed_at: datetime
+
+    # Goal classification
+    underlying_goal: str                   # What the user was trying to accomplish
+    goal_categories: dict[str, int]        # e.g. {"bugfix": 1, "refactor": 1}
+    task_type: str                         # bugfix | feature | refactor | docs | debug | config | exploration
+
+    # Outcome assessment
+    outcome: str                           # fully_achieved | partially_achieved | abandoned | unclear
+    completion_confidence: float           # 0.0-1.0 how confident we are in the outcome
+
+    # Session characteristics
+    session_type: str                      # quick_question | single_task | multi_task | iterative_refinement
+    complexity_score: int                  # 1-5 how complex was the session
+
+    # Friction analysis (extends existing friction.py)
+    friction_counts: dict[str, int]        # {type: count} — wrong_approach, user_rejected, data_quality, etc.
+    friction_detail: str | None            # Human-readable explanation
+    friction_score: float                  # 0.0-1.0 composite (reuse from analytics/friction.py)
+
+    # Tool effectiveness (cross-tool specific)
+    tools_that_helped: list[str]           # Tool names that contributed to success
+    tools_that_didnt: list[str]            # Tool names that caused friction
+    tool_helpfulness: str                  # unhelpful | slightly | moderately | very | extremely
+
+    # Languages and files
+    primary_language: str | None           # Dominant language in session
+    files_pattern: str | None              # "python_backend" | "react_frontend" | "config" | "docs"
+
+    # Summary
+    brief_summary: str                     # 1-2 sentence description
+    key_decisions: list[str]               # Major decisions or pivots made
+```
+
+#### Database Schema (New Tables in Existing SQLite)
+
+```sql
+-- Migration v3 → v4
+
+-- Per-session facets (the core analysis unit)
+CREATE TABLE IF NOT EXISTS session_facets (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    analyzed_at INTEGER NOT NULL,
+    analyzer_version TEXT NOT NULL,            -- "heuristic_v1" or "llm_v1"
+    analyzer_model TEXT,                       -- e.g. "claude-sonnet-4" if LLM-generated
+
+    -- Goal
+    underlying_goal TEXT NOT NULL,
+    goal_categories_json TEXT NOT NULL,        -- JSON dict
+    task_type TEXT NOT NULL,
+
+    -- Outcome
+    outcome TEXT NOT NULL,
+    completion_confidence REAL DEFAULT 0.5,
+
+    -- Session type
+    session_type TEXT NOT NULL,
+    complexity_score INTEGER DEFAULT 3,
+
+    -- Friction
+    friction_counts_json TEXT,                 -- JSON dict
+    friction_detail TEXT,
+    friction_score REAL DEFAULT 0.0,
+
+    -- Tool effectiveness
+    tools_helped_json TEXT,                    -- JSON array
+    tools_didnt_json TEXT,                     -- JSON array
+    tool_helpfulness TEXT,
+
+    -- Context
+    primary_language TEXT,
+    files_pattern TEXT,
+
+    -- Summary
+    brief_summary TEXT NOT NULL,
+    key_decisions_json TEXT                    -- JSON array
+);
+
+-- Aggregated insights cache (avoid recomputing on every run)
+CREATE TABLE IF NOT EXISTS insights_cache (
+    id TEXT PRIMARY KEY,                       -- "report_<date_range_hash>"
+    range_start INTEGER NOT NULL,
+    range_end INTEGER NOT NULL,
+    session_count INTEGER NOT NULL,
+    facet_count INTEGER NOT NULL,
+    report_json TEXT NOT NULL,                 -- Full InsightsReport as JSON
+    report_html TEXT,                          -- Rendered HTML (cached)
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL                -- Cache TTL (default: 24h)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_facets_source ON session_facets(source);
+CREATE INDEX IF NOT EXISTS idx_facets_task_type ON session_facets(task_type);
+CREATE INDEX IF NOT EXISTS idx_facets_outcome ON session_facets(outcome);
+CREATE INDEX IF NOT EXISTS idx_facets_analyzed ON session_facets(analyzed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facets_language ON session_facets(primary_language);
+```
+
+#### CLI Interface
+
+```bash
+# Stage 1: Extract facets from sessions
+sagg analyze-sessions [OPTIONS]
+
+Options:
+  --since DURATION           Only analyze sessions from last N (e.g., 7d, 30d)
+  --source TEXT               Filter by source tool
+  --project TEXT              Filter by project
+  --force                     Re-analyze sessions that already have facets
+  --analyzer [heuristic|llm]  Analysis method (default: heuristic, falls back if no LLM CLI)
+  --llm-cli [claude|codex|gemini]  Which CLI tool to use for LLM analysis (default: auto-detect)
+  --batch-size INTEGER        Sessions per LLM call (default: 10)
+  --dry-run                   Show what would be analyzed without doing it
+  -v, --verbose               Show per-session analysis results
+
+# Stage 2: Generate insights report
+sagg insights [OPTIONS]
+
+Options:
+  --since DURATION           Time range (default: 30d)
+  --source TEXT               Filter by source tool (repeatable for comparison)
+  --project TEXT              Filter by project
+  --format [tui|html|json]   Output format (default: tui)
+  --output FILE               Save report to file (html/json only)
+  --open                      Open HTML report in browser
+  --no-cache                  Force regeneration (ignore cached report)
+  -v, --verbose               Show detailed breakdowns
+```
+
+#### LLM Backend: CLI Tools Instead of SDKs
+
+**Key design decision**: Instead of adding `anthropic` or `openai` Python SDKs as dependencies, shell out to whichever AI CLI tool the user already has installed. This is natural for sagg — the user already has these tools (that's why they use sagg in the first place).
+
+```python
+class CLILLMBackend:
+    """Run LLM analysis by shelling out to installed AI CLI tools.
+
+    No SDK dependencies needed. Uses the user's existing auth and billing.
+    """
+
+    # Detection order — try each, use first available
+    BACKENDS = [
+        {
+            "name": "claude",
+            "check": ["claude", "--version"],
+            "cmd": ["claude", "-p"],             # pipe mode: reads stdin, prints response
+            "stdin": True,
+        },
+        {
+            "name": "codex",
+            "check": ["codex", "--version"],
+            "cmd": ["codex", "--quiet"],         # quiet mode: prompt as arg
+            "stdin": False,
+        },
+        {
+            "name": "gemini",
+            "check": ["gemini", "--version"],
+            "cmd": ["gemini", "-p"],
+            "stdin": True,
+        },
+    ]
+
+    def detect_available(self) -> str | None:
+        """Find first available CLI tool in PATH."""
+        for backend in self.BACKENDS:
+            try:
+                subprocess.run(backend["check"], capture_output=True, timeout=5)
+                return backend["name"]
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        return None
+
+    def analyze(self, prompt: str, backend_name: str) -> str:
+        """Send prompt to CLI tool and return response."""
+        backend = next(b for b in self.BACKENDS if b["name"] == backend_name)
+        if backend["stdin"]:
+            result = subprocess.run(
+                backend["cmd"],
+                input=prompt,
+                capture_output=True, text=True, timeout=120,
+            )
+        else:
+            result = subprocess.run(
+                backend["cmd"] + [prompt],
+                capture_output=True, text=True, timeout=120,
+            )
+        return result.stdout
+```
+
+**Why this approach:**
+
+| Approach | New Deps | Auth Setup | Billing | Works Offline |
+|----------|----------|------------|---------|---------------|
+| `anthropic` SDK | ~50MB | API key needed | Separate account | No |
+| `openai` SDK | ~30MB | API key needed | Separate account | No |
+| `claude -p` | **0** | Already configured | User's existing | No |
+| `codex -p` | **0** | Already configured | User's existing | No |
+| Heuristic only | **0** | None | Free | **Yes** |
+
+**Fallback chain**: `claude -p` → `codex -p` → `gemini -p` → heuristic-only
+
+**Cost estimate (LLM backend):**
+- ~3K input tokens + ~500 output tokens per session (condensed transcript)
+- At Claude Sonnet pricing: ~$0.012 per session
+- 256 sessions ≈ $3.07 total
+- Batch mode (10 sessions/call): ~$1.50 total
+
+#### Facet Extraction: Two Backends
+
+**Backend A: Heuristic Analyzer (zero cost, always available)**
+
+Uses existing sagg infrastructure + new heuristics:
+
+```python
+class HeuristicAnalyzer:
+    """Extract facets without LLM using pattern matching and existing analytics."""
+
+    def analyze(self, session: UnifiedSession) -> SessionFacet:
+        # 1. Goal: first user message + title
+        goal = self._extract_goal(session)
+
+        # 2. Task type: from tool usage + file extensions
+        #    high error_rate (from friction.py) → "debug"
+        #    mostly Read/Grep → "exploration"
+        #    mostly Edit/Write → "feature" or "refactor"
+        #    "test" in tools/files → "testing"
+        task_type = self._classify_task_type(session)
+
+        # 3. Outcome: heuristic from session ending
+        #    last message is assistant with no follow-up → likely achieved
+        #    session < 2 turns → abandoned
+        #    high friction score → partially_achieved
+        outcome = self._assess_outcome(session)
+
+        # 4. Friction: reuse existing analytics/friction.py
+        friction_score = calculate_friction_score(
+            analyze_retries(session),
+            analyze_error_rate(session),
+            analyze_back_and_forth(session),
+        )
+
+        # 5. Language: from file extensions in files_modified
+        language = self._detect_language(session)
+
+        # 6. Summary: first user message truncated + stats
+        summary = self._generate_summary(session)
+
+        return SessionFacet(...)
+```
+
+**Backend B: LLM Analyzer (higher quality, uses CLI tools)**
+
+Sends condensed transcript to LLM via CLI:
+
+```python
+class LLMAnalyzer:
+    """Extract facets using an LLM via CLI tools (claude -p, codex, etc.)."""
+
+    PROMPT = """Analyze this AI coding session and extract structured metadata.
+
+Session Info:
+- Tool: {source}
+- Project: {project_name}
+- Duration: {duration}
+- Turns: {turn_count}
+- Models: {models}
+
+Transcript (condensed):
+{condensed_transcript}
+
+Respond with JSON only, matching this schema:
+{schema}
+
+Guidelines:
+- goal_categories: use lowercase_snake_case keys
+- task_type: one of bugfix, feature, refactor, docs, debug, config, exploration
+- outcome: one of fully_achieved, partially_achieved, abandoned, unclear
+- friction_counts keys: wrong_approach, user_rejected_action, data_quality,
+  incomplete_response, tool_error, context_loss, performance_issue
+- Be concise in brief_summary (1-2 sentences)
+"""
+
+    def condense_transcript(self, session: UnifiedSession, max_tokens: int = 4000) -> str:
+        """Reduce transcript to fit LLM context budget.
+
+        Keep:
+          ✓ All user messages (verbatim)
+          ✓ First 200 chars of each assistant text response
+          ✓ Tool names + whether they succeeded/failed
+          ✓ Error messages (full text)
+          ✓ File paths modified
+
+        Drop:
+          ✗ Tool input parameters (file contents, code blocks)
+          ✗ Tool output results (command output, file reads)
+          ✗ System messages
+          ✗ Cached/repeated content
+        """
+        ...
+
+    def analyze(self, session: UnifiedSession, cli: CLILLMBackend) -> SessionFacet:
+        condensed = self.condense_transcript(session)
+        prompt = self.PROMPT.format(...)
+        response = cli.analyze(prompt, backend_name="claude")
+        return SessionFacet.model_validate_json(response)
+```
+
+#### Insights Report Model
+
+```python
+class InsightsReport(BaseModel):
+    """The complete insights report, aggregated from all facets."""
+
+    # Metadata
+    generated_at: datetime
+    range_start: datetime
+    range_end: datetime
+    total_sessions: int
+    total_facets: int
+
+    # Sections (mapped to TUI tabs)
+    at_a_glance: AtAGlance
+    project_areas: list[ProjectArea]
+    interaction_style: InteractionStyle
+    impressive_workflows: list[Workflow]
+    friction_analysis: FrictionAnalysis
+    tool_comparison: ToolComparison           # Cross-tool — sagg exclusive
+    suggestions: SuggestionsSection           # Includes AGENTS.md suggestions
+    trends: TrendAnalysis
+    fun_ending: FunEnding
+
+
+class AtAGlance(BaseModel):
+    whats_working: str
+    whats_hindering: str
+    quick_wins: str
+    ambitious_workflows: str
+
+
+class ProjectArea(BaseModel):
+    name: str
+    session_count: int
+    description: str
+    primary_tools: list[str]                  # Which AI tools used here
+    success_rate: float                       # % fully_achieved
+    avg_friction: float
+
+
+class ToolComparison(BaseModel):
+    """Cross-tool analysis — the unique value sagg provides over Claude's /insights."""
+
+    tools_analyzed: list[str]
+    sessions_per_tool: dict[str, int]
+    tool_metrics: list[ToolMetric]
+    best_for: dict[str, str]                  # {"python_debug": "claude", "react_ui": "cursor"}
+    narrative: str
+
+
+class ToolMetric(BaseModel):
+    tool: str                                 # "claude" | "cursor" | "opencode"
+    session_count: int
+    avg_turns: float
+    avg_duration_ms: int | None
+    avg_friction_score: float
+    success_rate: float
+    avg_tokens: int
+    top_task_types: list[str]
+    helpfulness_distribution: dict[str, int]
+
+
+class FrictionAnalysis(BaseModel):
+    total_friction_sessions: int
+    friction_by_category: dict[str, int]
+    friction_by_tool: dict[str, float]        # {tool: avg_friction_score}
+    top_friction_patterns: list[FrictionPattern]
+    narrative: str
+
+
+class FrictionPattern(BaseModel):
+    category: str
+    count: int
+    description: str
+    affected_tools: list[str]
+    examples: list[str]
+
+
+class SuggestionsSection(BaseModel):
+    """Suggestions including AGENTS.md additions for each tool."""
+
+    agents_md_additions: list[AgentsMdSuggestion]
+    usage_patterns: list[UsagePattern]
+    tool_recommendations: list[ToolRecommendation]
+
+
+class AgentsMdSuggestion(BaseModel):
+    """Suggested addition to AGENTS.md (or CLAUDE.md, .cursorrules, etc.)
+
+    Unlike Claude's /insights which only suggests CLAUDE.md changes,
+    sagg detects which config file each tool uses and suggests additions
+    for all of them.
+    """
+    target_file: str                          # "CLAUDE.md" | ".cursorrules" | "AGENTS.md" | "codex.md"
+    target_tool: str                          # Which tool this applies to
+    addition: str                             # The text to add
+    why: str                                  # Evidence from session data
+    section_hint: str                         # e.g. "Add under ## Data Processing"
+
+
+class UsagePattern(BaseModel):
+    title: str
+    suggestion: str
+    detail: str
+    copyable_prompt: str | None
+
+
+class ToolRecommendation(BaseModel):
+    task_type: str                            # "python_debug" | "react_ui" | "docs"
+    recommended_tool: str
+    reason: str
+    confidence: float                         # 0.0-1.0 based on sample size
+
+
+class TrendAnalysis(BaseModel):
+    sessions_per_day: dict[str, int]
+    friction_trend: str                       # "improving" | "stable" | "worsening"
+    tool_adoption: dict[str, list[int]]       # tool → [week1_count, week2_count, ...]
+    productivity_trend: str
+
+
+class FunEnding(BaseModel):
+    headline: str
+    detail: str
+```
+
+#### TUI Layout (Primary Output)
+
+```
+┌─ sagg insights ──────────────── 256 sessions · 30d ── [c]laude [u]rsor [o]pencode [a]ll ┐
+│                                                                                          │
+│  At a Glance                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │ Working: Most productive with Claude for Python (92% success rate)                  │  │
+│  │ Hindering: OpenCode has 2.3x higher friction than Claude                            │  │
+│  │ Quick win: Create a /preprocess skill for your data validation workflow             │  │
+│  └─────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                          │
+│ ┌ [1] Overview ─ [2] Tools ─ [3] Friction ─ [4] Trends ─ [5] Suggestions ─ [6] Horizon ┐│
+│ │                                                                                        ││
+│ │  Cross-Tool Comparison                                                                 ││
+│ │  ═══════════════════                                                                   ││
+│ │               Sessions  Success  Friction  Avg Turns  Best For                         ││
+│ │  Claude           83     88%      0.21       12.3     Python, debugging                ││
+│ │  Cursor           89     82%      0.31        8.7     React, UI work                   ││
+│ │  OpenCode         84     79%      0.48        6.2     Quick edits                      ││
+│ │                                                                                        ││
+│ │  Success Rate                                                                          ││
+│ │  Claude   ████████████████████░░ 88%                                                   ││
+│ │  Cursor   ████████████████░░░░░░ 82%                                                   ││
+│ │  OpenCode ███████████████░░░░░░░ 79%                                                   ││
+│ │                                                                                        ││
+│ │  Recommendation: Use Claude for Python debugging (34% faster)                          ││
+│ │                  Use Cursor for React/UI (shorter sessions, less friction)              ││
+│ │                                                                                        ││
+│ └────────────────────────────────────────────────── ↑↓ scroll · Tab next · Enter drill ──┘│
+│                                                                                          │
+│  Fun: "User interrupted Claude twice to stop subagent spawning"                          │
+│  [e] Export HTML   [j] Export JSON   [q] Quit                                            │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**TUI Tabs:**
+
+| Tab | Key | Content | Drill-down |
+|-----|-----|---------|------------|
+| Overview | `1` | At a Glance + project areas + goal/language/session type bars | Enter on project area → show its sessions |
+| Tools | `2` | Cross-tool comparison table + success/friction bars + recommendations | Enter on tool → show its sessions |
+| Friction | `3` | Friction categories with examples + friction type bars + satisfaction | Enter on friction pattern → show affected sessions |
+| Trends | `4` | Sessions over time (sparkline) + friction trend + tool adoption | — |
+| Suggestions | `5` | AGENTS.md additions + usage patterns + tool recommendations | Enter on suggestion → copy to clipboard |
+| Horizon | `6` | Ambitious workflow ideas (like Claude's On the Horizon) | Enter → copy prompt to clipboard |
+
+**Drill-down** is the key advantage over HTML — press Enter on any friction pattern, tool metric, or project area to see the actual sessions that produced that data point. This turns insights from a static report into an interactive debugging tool for your workflow.
+
+**Keyboard shortcuts:**
+- `1`-`6`: Switch tabs
+- `c`, `u`, `o`, `a`: Filter by Claude / Cursor / OpenCode / All
+- `Enter`: Drill into selected item
+- `e`: Export as HTML
+- `j`: Export as JSON
+- `q`: Quit
+- `↑↓`: Scroll within tab
+- `Tab`/`Shift+Tab`: Next/previous tab
+
+#### Suggestions Tab: AGENTS.md Additions
+
+Unlike Claude's `/insights` which only suggests CLAUDE.md changes, sagg detects which configuration file each tool uses and suggests additions for all relevant tools:
+
+```
+┌─ [5] Suggestions ──────────────────────────────────────────────────────────────────────┐
+│                                                                                        │
+│  AGENTS.md / Tool Config Suggestions                                                   │
+│  ════════════════════════════════════                                                   │
+│  Based on friction patterns across your sessions, add these to your tool configs:      │
+│                                                                                        │
+│  ┌─ CLAUDE.md ─────────────────────────────────────────────────────────────────────┐   │
+│  │ [x] "Use polars instead of pandas for datasets with >90% missing values"        │   │
+│  │     Why: 186 data quality friction events; pandas→polars switch in 3 sessions   │   │
+│  │                                                                                  │   │
+│  │ [x] "Check for existing spec.md before creating new documentation"              │   │
+│  │     Why: Had to redirect Claude to existing spec files 4 times                  │   │
+│  │                                                                                  │   │
+│  │ [x] "Avoid using task agents unless explicitly requested"                       │   │
+│  │     Why: User rejected subagent usage 162 times                                 │   │
+│  └──────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                        │
+│  ┌─ .cursorrules ──────────────────────────────────────────────────────────────────┐   │
+│  │ [x] "For Python files, prefer polars over pandas for data processing"           │   │
+│  │     Why: Cursor Python sessions had 31% friction from wrong library choice      │   │
+│  └──────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                        │
+│  ┌─ AGENTS.md (universal) ─────────────────────────────────────────────────────────┐   │
+│  │ [x] "Industrial equipment data has 90%+ missing values. Always profile first."  │   │
+│  │     Why: Pattern detected across Claude (83 sessions) + OpenCode (84 sessions)  │   │
+│  └──────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                        │
+│  [Enter] Copy selected   [Space] Toggle checkbox   [A] Copy all checked               │
+│                                                                                        │
+│  Tool Recommendations                                                                  │
+│  ════════════════════                                                                   │
+│  Python debugging  → Claude (34% faster, 92% success)                                  │
+│  React/UI work     → Cursor (shorter sessions, better completions)                     │
+│  Quick file edits  → OpenCode (fastest start-to-finish)                                │
+│  Documentation     → Claude (handles multi-file updates well)                          │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Target file detection logic:**
+
+| Tool | Config File | Detection |
+|------|-------------|-----------|
+| Claude Code | `CLAUDE.md` | Always present if Claude sessions exist |
+| Cursor | `.cursorrules` or `.cursor/rules` | Check project root |
+| OpenCode | `AGENTS.md` or `opencode.md` | Check project root |
+| Codex | `codex.md` or `AGENTS.md` | Check project root |
+| Universal | `AGENTS.md` | Cross-tool patterns (same friction in 2+ tools) |
+
+**How suggestions are generated:**
+1. Aggregate `friction_counts` across all facets
+2. Group by friction type and affected tool
+3. For each pattern appearing ≥3 times: generate a config suggestion
+4. If same pattern appears across 2+ tools: generate an `AGENTS.md` (universal) suggestion
+5. Format as copyable text with evidence ("Why: ...")
+
+#### HTML Export
+
+`sagg insights --format html --output report.html --open`
+
+- Standalone HTML file with all CSS/JS inline (no external deps)
+- Styled similarly to Claude Code's report (clean, Inter font, card-based layout)
+- All sections from the TUI rendered as scrollable HTML
+- Bar charts rendered as CSS (like Claude's report — no charting library needed)
+- Copy buttons on all suggestions and prompts
+- Stored at `~/.sagg/reports/insights-<date>.html` by default
+
+#### Aggregation Logic
+
+```python
+def generate_insights(store: SessionStore, since: str = "30d") -> InsightsReport:
+    """Main insights generation pipeline."""
+
+    # 1. Load all facets in range
+    facets = store.get_facets(since=since)
+
+    # 2. Load session stats (reuse existing store.get_stats())
+    stats = store.get_stats()
+
+    # 3. Cross-tool comparison
+    #    Group facets by source tool
+    #    Calculate per-tool: avg friction, success rate, avg turns, top tasks
+    #    Generate "best for" recommendations
+    tool_comparison = _build_tool_comparison(facets)
+
+    # 4. Project area clustering
+    #    Group by project_name + goal_categories
+    #    Merge similar projects (same git repo, different branches)
+    #    Calculate per-area stats
+    project_areas = _cluster_project_areas(facets)
+
+    # 5. Friction aggregation
+    #    Sum friction_counts across all facets
+    #    Group by tool to find tool-specific patterns
+    #    Find top friction categories
+    friction = _aggregate_friction(facets)
+
+    # 6. Interaction style narrative
+    #    Session type distribution (quick_question vs multi_task)
+    #    Average complexity
+    #    Tool switching patterns
+    style = _analyze_interaction_style(facets, stats)
+
+    # 7. Trends
+    #    Weekly session counts
+    #    Friction trend (compare last 2 weeks)
+    #    Tool adoption changes
+    trends = _compute_trends(facets)
+
+    # 8. Suggestions (rule-based from friction patterns)
+    #    AGENTS.md / CLAUDE.md / .cursorrules additions
+    #    Tool recommendations per task type
+    suggestions = _generate_suggestions(facets, friction, tool_comparison)
+
+    # 9. Fun ending (pick most memorable session)
+    fun = _pick_fun_ending(facets)
+
+    return InsightsReport(...)
+```
+
+#### Integration with Existing Analytics
+
+| Existing Module | How Insights Uses It |
+|---|---|
+| `analytics/friction.py` | Friction scores feed into facet `friction_score` and `friction_counts` |
+| `analytics/similar.py` | TF-IDF vectors help cluster project areas and detect duplicate goals |
+| `analytics/heatmap.py` | Activity data feeds into `TrendAnalysis.sessions_per_day` |
+| `analytics/oracle.py` | Search infrastructure helps find example sessions for friction patterns |
+| `storage/store.py` | All queries go through existing store; new methods added for facets |
+| `models.py` | `SessionFacet` added as new model; `UnifiedSession` unchanged |
+
+#### New Store Methods
+
+```python
+# Added to SessionStore
+def upsert_facet(self, facet: SessionFacet) -> None: ...
+def get_facet(self, session_id: str) -> SessionFacet | None: ...
+def get_facets(self, source=None, since=None, project=None) -> list[SessionFacet]: ...
+def get_unfaceted_sessions(self, since=None, limit=100) -> list[UnifiedSession]: ...
+def get_insights_cache(self, range_hash: str) -> InsightsReport | None: ...
+def set_insights_cache(self, range_hash: str, report: InsightsReport, ttl_hours=24) -> None: ...
+def get_facet_stats(self) -> dict: ...
+```
+
+#### Example Workflows
+
+```bash
+# First time: analyze all sessions with heuristic (free, fast)
+$ sagg analyze-sessions --since 30d
+Analyzing 256 sessions (heuristic)...
+  ████████████████████████████████████████ 256/256
+Created 256 facets (heuristic_v1)
+
+# View insights in TUI
+$ sagg insights
+[opens TUI with tabbed layout]
+
+# Higher quality with LLM (auto-detects claude -p)
+$ sagg analyze-sessions --since 7d --analyzer llm
+Detected: claude -p (Claude Code CLI)
+Analyzing 42 sessions via claude -p...
+  ████████████████████████████████████████ 42/42
+Created 42 facets (llm_v1 via claude)
+Estimated cost: ~$0.50
+
+# Force a specific CLI backend
+$ sagg analyze-sessions --analyzer llm --llm-cli codex
+Analyzing via codex...
+
+# Compare tools, export HTML
+$ sagg insights --source claude --source cursor --format html --open
+[generates HTML, opens in browser]
+
+# JSON for scripting
+$ sagg insights --since 7d --format json > weekly-insights.json
+```
+
+#### Relationship to Other Planned Features
+
+- **`sagg summarize` (§13.6)**: Summarize generates *work reports* ("what did I do"). Insights generates *meta-analysis* ("how am I working"). They share the LLM infrastructure (CLI backend) but serve different purposes.
+- **`sagg analyze` (§13.2)**: Topic clustering feeds into insights' `project_areas` grouping. Insights is the consumer; analyze is the producer.
+- **`sagg benchmark` (§16.3)**: Benchmark tracks per-suggestion acceptance. Insights uses higher-level per-session outcomes. Benchmark data could enrich facets in future.
+- **`sagg session-dna` (§16.2)**: Session fingerprints could replace or supplement TF-IDF clustering in project area detection.
+- **`sagg friction-points` (existing)**: Insights subsumes friction-points by aggregating friction across all sessions with cross-tool breakdown. The existing `friction-points` command remains useful for quick per-session checks.
+
+#### Dependencies
+
+```toml
+# No new required dependencies.
+# Heuristic analyzer: uses existing sagg code only.
+# LLM analyzer: shells out to CLI tools already on user's PATH.
+# TUI: uses existing textual dependency.
+# HTML export: generates standalone HTML with inline CSS (no template engine needed).
+```
+
+#### Success Criteria
+
+| Criteria | Metric |
+|---|---|
+| Heuristic analyzer covers all sessions | 100% of collected sessions get facets |
+| LLM analyzer quality | Manual review: facets rated "accurate" ≥80% |
+| Cross-tool comparison is actionable | ≥1 tool recommendation per task type |
+| TUI loads fast | <3s for 500 sessions (from cached facets) |
+| HTML report is shareable | Standalone file, no external deps |
+| Incremental analysis | Only new/changed sessions re-analyzed |
+| No new pip dependencies | CLI tools + heuristics only |
 
 ---
 

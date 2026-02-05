@@ -650,6 +650,226 @@ class SessionStore:
         )
         self._db.commit()
 
+    # Facet management methods
+
+    def upsert_facet(self, facet_data: dict) -> None:
+        """Save or update a session facet.
+
+        Args:
+            facet_data: Dictionary with facet fields matching session_facets schema.
+        """
+        import json as _json
+
+        self._db.execute(
+            """
+            INSERT OR REPLACE INTO session_facets (
+                session_id, source, analyzed_at, analyzer_version, analyzer_model,
+                underlying_goal, goal_categories_json, task_type,
+                outcome, completion_confidence,
+                session_type, complexity_score,
+                friction_counts_json, friction_detail, friction_score,
+                tools_helped_json, tools_didnt_json, tool_helpfulness,
+                primary_language, files_pattern,
+                brief_summary, key_decisions_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                facet_data["session_id"],
+                facet_data["source"],
+                facet_data["analyzed_at"],
+                facet_data["analyzer_version"],
+                facet_data.get("analyzer_model"),
+                facet_data["underlying_goal"],
+                _json.dumps(facet_data.get("goal_categories", {})),
+                facet_data["task_type"],
+                facet_data["outcome"],
+                facet_data.get("completion_confidence", 0.5),
+                facet_data["session_type"],
+                facet_data.get("complexity_score", 3),
+                _json.dumps(facet_data.get("friction_counts", {})),
+                facet_data.get("friction_detail"),
+                facet_data.get("friction_score", 0.0),
+                _json.dumps(facet_data.get("tools_that_helped", [])),
+                _json.dumps(facet_data.get("tools_that_didnt", [])),
+                facet_data.get("tool_helpfulness", "moderately"),
+                facet_data.get("primary_language"),
+                facet_data.get("files_pattern"),
+                facet_data.get("brief_summary", ""),
+                _json.dumps(facet_data.get("key_decisions", [])),
+            ),
+        )
+        self._db.commit()
+
+    def get_facet(self, session_id: str) -> dict | None:
+        """Get a facet by session ID.
+
+        Args:
+            session_id: Session ID.
+
+        Returns:
+            Facet dict or None.
+        """
+        cursor = self._db.execute(
+            "SELECT * FROM session_facets WHERE session_id = ?", (session_id,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        return self._row_to_facet(row)
+
+    def get_facets(
+        self,
+        source: str | None = None,
+        since: datetime | None = None,
+        project: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict]:
+        """Get facets with optional filtering.
+
+        Args:
+            source: Filter by source tool.
+            since: Only facets for sessions created after this datetime.
+            project: Filter by project (partial match via sessions table).
+            limit: Maximum results.
+
+        Returns:
+            List of facet dicts.
+        """
+        conditions = []
+        params: list[str | int] = []
+
+        if source is not None:
+            conditions.append("f.source = ?")
+            params.append(source)
+
+        if since is not None:
+            conditions.append("s.created_at >= ?")
+            params.append(int(since.timestamp()))
+
+        if project is not None:
+            conditions.append("(s.project_path LIKE ? OR s.project_name LIKE ?)")
+            params.append(f"%{project}%")
+            params.append(f"%{project}%")
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        query = f"""
+            SELECT f.* FROM session_facets f
+            JOIN sessions s ON f.session_id = s.id
+            WHERE {where_clause}
+            ORDER BY s.created_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        cursor = self._db.execute(query, tuple(params))
+        return [self._row_to_facet(row) for row in cursor]
+
+    def get_unfaceted_sessions(
+        self,
+        since: datetime | None = None,
+        source: str | None = None,
+        limit: int = 500,
+    ) -> list[UnifiedSession]:
+        """Get sessions that don't have facets yet.
+
+        Args:
+            since: Only sessions created after this datetime.
+            source: Filter by source tool.
+            limit: Maximum results.
+
+        Returns:
+            List of sessions without facets.
+        """
+        conditions = ["f.session_id IS NULL"]
+        params: list[str | int] = []
+
+        if since is not None:
+            conditions.append("s.created_at >= ?")
+            params.append(int(since.timestamp()))
+
+        if source is not None:
+            conditions.append("s.source = ?")
+            params.append(source)
+
+        where_clause = " AND ".join(conditions)
+
+        query = f"""
+            SELECT s.* FROM sessions s
+            LEFT JOIN session_facets f ON s.id = f.session_id
+            WHERE {where_clause}
+            ORDER BY s.created_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        cursor = self._db.execute(query, tuple(params))
+        return [self._row_to_session(row, include_content=False) for row in cursor]
+
+    def get_facet_stats(self) -> dict:
+        """Get aggregated facet statistics.
+
+        Returns:
+            Dictionary with facet counts by source, task type, outcome.
+        """
+        stats: dict = {}
+
+        cursor = self._db.execute("SELECT COUNT(*) as count FROM session_facets")
+        row = cursor.fetchone()
+        stats["total_facets"] = row["count"] if row else 0
+
+        cursor = self._db.execute(
+            "SELECT source, COUNT(*) as count FROM session_facets GROUP BY source"
+        )
+        stats["facets_by_source"] = {row["source"]: row["count"] for row in cursor}
+
+        cursor = self._db.execute(
+            "SELECT task_type, COUNT(*) as count FROM session_facets GROUP BY task_type ORDER BY count DESC"
+        )
+        stats["facets_by_task_type"] = {row["task_type"]: row["count"] for row in cursor}
+
+        cursor = self._db.execute(
+            "SELECT outcome, COUNT(*) as count FROM session_facets GROUP BY outcome ORDER BY count DESC"
+        )
+        stats["facets_by_outcome"] = {row["outcome"]: row["count"] for row in cursor}
+
+        return stats
+
+    def _row_to_facet(self, row: dict) -> dict:
+        """Convert a database row to a facet dictionary.
+
+        Args:
+            row: Database row (dict-like).
+
+        Returns:
+            Facet dictionary with parsed JSON fields.
+        """
+        return {
+            "session_id": row["session_id"],
+            "source": row["source"],
+            "analyzed_at": row["analyzed_at"],
+            "analyzer_version": row["analyzer_version"],
+            "analyzer_model": row["analyzer_model"],
+            "underlying_goal": row["underlying_goal"],
+            "goal_categories": json.loads(row["goal_categories_json"]) if row["goal_categories_json"] else {},
+            "task_type": row["task_type"],
+            "outcome": row["outcome"],
+            "completion_confidence": row["completion_confidence"],
+            "session_type": row["session_type"],
+            "complexity_score": row["complexity_score"],
+            "friction_counts": json.loads(row["friction_counts_json"]) if row["friction_counts_json"] else {},
+            "friction_detail": row["friction_detail"],
+            "friction_score": row["friction_score"],
+            "tools_that_helped": json.loads(row["tools_helped_json"]) if row["tools_helped_json"] else [],
+            "tools_that_didnt": json.loads(row["tools_didnt_json"]) if row["tools_didnt_json"] else [],
+            "tool_helpfulness": row["tool_helpfulness"],
+            "primary_language": row["primary_language"],
+            "files_pattern": row["files_pattern"],
+            "brief_summary": row["brief_summary"],
+            "key_decisions": json.loads(row["key_decisions_json"]) if row["key_decisions_json"] else [],
+        }
+
     # Budget management methods
 
     def set_budget(self, period: str, limit: int) -> None:
