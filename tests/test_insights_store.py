@@ -315,6 +315,30 @@ class TestGetUnfacetedSessions:
         unfaceted = session_store.get_unfaceted_sessions(since=past)
         assert len(unfaceted) == 1
 
+    def test_filter_by_project(self, session_store, sample_session):
+        from sagg.models import generate_session_id, UnifiedSession, SourceTool, SessionStats
+
+        session_store.save_session(sample_session)
+
+        second = UnifiedSession(
+            id=generate_session_id(),
+            source=SourceTool.CLAUDE,
+            source_id="test-session-unfacet-project",
+            source_path="/tmp/test/session-project.json",
+            title="Claude Session",
+            project_name="other-project",
+            project_path="/tmp/other-project",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            stats=SessionStats(turn_count=0, message_count=0, input_tokens=0, output_tokens=0),
+            turns=[],
+        )
+        session_store.save_session(second)
+
+        unfaceted = session_store.get_unfaceted_sessions(project="test-project")
+        assert len(unfaceted) == 1
+        assert unfaceted[0].id == sample_session.id
+
 
 # ---------------------------------------------------------------------------
 # 6. get_facet_stats
