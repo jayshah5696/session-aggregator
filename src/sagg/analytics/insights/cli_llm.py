@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -66,6 +68,31 @@ Return JSON with these exact fields:
 }}
 
 friction_counts keys can be: wrong_approach, user_rejected_action, data_quality, incomplete_response, tool_error, context_loss, performance_issue
+"""
+
+BATCH_FACET_PROMPT_TEMPLATE = """Analyze these AI coding sessions and return ONLY valid JSON (no markdown fencing).
+
+Return a JSON array. Each element must contain:
+{{
+  "index": 0,
+  "underlying_goal": "what the user was trying to accomplish",
+  "goal_categories": {{"category_name": 1}},
+  "task_type": "one of: bugfix, feature, refactor, docs, debug, config, exploration",
+  "outcome": "one of: fully_achieved, partially_achieved, abandoned, unclear",
+  "completion_confidence": 0.7,
+  "session_type": "one of: quick_question, single_task, multi_task, iterative_refinement",
+  "complexity_score": 3,
+  "friction_counts": {{"friction_type": count}},
+  "friction_detail": "description or null",
+  "tool_helpfulness": "one of: unhelpful, slightly, moderately, very, extremely",
+  "primary_language": "python or null",
+  "files_pattern": "pattern or null",
+  "brief_summary": "1-2 sentence summary",
+  "key_decisions": ["decision1", "decision2"]
+}}
+
+Sessions to analyze:
+{sessions_json}
 """
 
 
@@ -143,6 +170,15 @@ def run_llm_prompt(prompt: str, backend_name: str | None = None) -> str:
     return result.stdout.strip()
 
 
+def _strip_markdown_fence(text: str) -> str:
+    """Strip markdown code fences from LLM output if present."""
+    if "```json" in text:
+        return text.split("```json", 1)[1].split("```", 1)[0].strip()
+    if "```" in text:
+        return text.split("```", 1)[1].split("```", 1)[0].strip()
+    return text.strip()
+
+
 def condense_transcript(session: UnifiedSession, max_chars: int = 8000) -> str:
     """Reduce a session transcript for LLM analysis.
 
@@ -206,8 +242,6 @@ def analyze_session_llm(
     Returns:
         Dictionary matching the session_facets schema.
     """
-    import time
-
     transcript = condense_transcript(session)
 
     prompt = FACET_PROMPT_TEMPLATE.format(
@@ -224,11 +258,7 @@ def analyze_session_llm(
     response = run_llm_prompt(prompt, backend_name)
 
     # Parse JSON from response (handle potential markdown fencing)
-    json_text = response
-    if "```json" in json_text:
-        json_text = json_text.split("```json")[1].split("```")[0]
-    elif "```" in json_text:
-        json_text = json_text.split("```")[1].split("```")[0]
+    json_text = _strip_markdown_fence(response)
 
     try:
         parsed = json.loads(json_text.strip())
@@ -238,12 +268,21 @@ def analyze_session_llm(
         return analyze_session(session)
 
     # Merge LLM output with session metadata
+    return _build_facet_from_parsed(session, parsed=parsed, analyzer_model=backend_name)
+
+
+def _build_facet_from_parsed(
+    session: UnifiedSession,
+    parsed: dict,
+    analyzer_model: str | None,
+) -> dict:
+    """Build facet payload from parsed LLM output."""
     return {
         "session_id": session.id,
         "source": session.source.value,
         "analyzed_at": int(time.time()),
         "analyzer_version": "llm_v1",
-        "analyzer_model": backend_name,
+        "analyzer_model": analyzer_model,
         "underlying_goal": parsed.get("underlying_goal", ""),
         "goal_categories": parsed.get("goal_categories", {}),
         "task_type": parsed.get("task_type", "exploration"),
@@ -262,3 +301,63 @@ def analyze_session_llm(
         "brief_summary": parsed.get("brief_summary", ""),
         "key_decisions": parsed.get("key_decisions", []),
     }
+
+
+def is_session_substantive(session: UnifiedSession) -> bool:
+    """Return True when a session appears meaningful enough for LLM analysis."""
+    if session.stats.message_count > 0 and session.stats.turn_count > 0:
+        return True
+    transcript = condense_transcript(session, max_chars=600)
+    return len(transcript.strip()) >= 40
+
+
+def analyze_sessions_llm_batch(
+    sessions: Sequence[UnifiedSession],
+    backend_name: str | None = None,
+) -> list[dict]:
+    """Analyze multiple sessions in a single LLM call."""
+    if not sessions:
+        return []
+
+    payload = [
+        {
+            "index": i,
+            "source": session.source.value,
+            "project_name": session.project_name or "unknown",
+            "turn_count": len(session.turns),
+            "file_count": len(session.stats.files_modified),
+            "transcript": condense_transcript(session, max_chars=3000),
+        }
+        for i, session in enumerate(sessions)
+    ]
+
+    prompt = BATCH_FACET_PROMPT_TEMPLATE.format(
+        sessions_json=json.dumps(payload, ensure_ascii=False),
+    )
+    response = run_llm_prompt(prompt, backend_name=backend_name)
+    json_text = _strip_markdown_fence(response)
+
+    from sagg.analytics.insights.heuristic import analyze_session
+
+    try:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError:
+        return [analyze_session(session) for session in sessions]
+
+    if not isinstance(parsed, list):
+        return [analyze_session(session) for session in sessions]
+
+    by_index = {
+        item.get("index"): item
+        for item in parsed
+        if isinstance(item, dict) and isinstance(item.get("index"), int)
+    }
+
+    results: list[dict] = []
+    for i, session in enumerate(sessions):
+        item = by_index.get(i)
+        if item is None:
+            results.append(analyze_session(session))
+        else:
+            results.append(_build_facet_from_parsed(session, parsed=item, analyzer_model=backend_name))
+    return results

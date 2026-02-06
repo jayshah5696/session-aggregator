@@ -1824,6 +1824,13 @@ def budget_clear(weekly: bool, daily: bool) -> None:
     help="Analysis method (default: heuristic)",
 )
 @click.option("--llm-cli", type=str, help="Which CLI for LLM (claude, codex, gemini). Auto-detects if omitted.")
+@click.option("--batch-size", type=int, default=10, show_default=True, help="Sessions per LLM call")
+@click.option(
+    "--resume/--no-resume",
+    default=True,
+    show_default=True,
+    help="With --force --analyzer llm, skip sessions already analyzed in this range",
+)
 @click.option("--dry-run", is_flag=True, help="Show what would be analyzed")
 @click.option("--verbose", "-v", is_flag=True, help="Show per-session results")
 def analyze_sessions(
@@ -1833,6 +1840,8 @@ def analyze_sessions(
     force: bool,
     analyzer: str,
     llm_cli: str | None,
+    batch_size: int,
+    resume: bool,
     dry_run: bool,
     verbose: bool,
 ) -> None:
@@ -1846,6 +1855,10 @@ def analyze_sessions(
         sagg analyze-sessions --analyzer llm     # Use LLM via CLI tool
         sagg analyze-sessions --since 7d --force # Re-analyze last week
     """
+    if batch_size < 1:
+        error_console.print("[red]Error:[/red] --batch-size must be >= 1")
+        sys.exit(1)
+
     try:
         delta = parse_duration(since)
         since_dt = datetime.now(timezone.utc) - delta
@@ -1864,9 +1877,12 @@ def analyze_sessions(
         if force:
             sessions = store.list_sessions(source=source, project=project, since=since_dt, limit=5000)
         else:
-            sessions = store.get_unfaceted_sessions(since=since_dt, source=source, limit=5000)
-            if project:
-                sessions = [s for s in sessions if project.lower() in (s.project_name or "").lower()]
+            sessions = store.get_unfaceted_sessions(
+                since=since_dt,
+                source=source,
+                project=project,
+                limit=5000,
+            )
 
         if not sessions:
             console.print("[dim]No sessions to analyze.[/dim]")
@@ -1883,6 +1899,7 @@ def analyze_sessions(
         console.print(f"[bold]Analyzing {len(sessions)} session(s) ({analyzer})...[/bold]")
 
         # Check LLM availability if needed
+        backend: str | None = None
         if analyzer == "llm":
             from sagg.analytics.insights.cli_llm import detect_available_backend
 
@@ -1896,7 +1913,97 @@ def analyze_sessions(
             console.print(f"[dim]Using LLM backend: {backend}[/dim]")
 
         analyzed = 0
+        skipped_non_substantive = 0
+        skipped_already_analyzed = 0
         errors = 0
+
+        if analyzer == "llm":
+            from sagg.analytics.insights.cli_llm import (
+                analyze_session_llm,
+                analyze_sessions_llm_batch,
+                is_session_substantive,
+            )
+
+            completed_ids: set[str] = set()
+            if force and resume:
+                existing_facets = store.get_facets(source=source, since=since_dt, project=project, limit=10000)
+                completed_ids = {
+                    f["session_id"]
+                    for f in existing_facets
+                    if f.get("analyzer_version") == "llm_v1"
+                }
+                if completed_ids and verbose:
+                    console.print(
+                        f"[dim]Resume enabled: skipping {len(completed_ids)} already analyzed sessions[/dim]"
+                    )
+
+            llm_sessions = []
+            for session in sessions:
+                if session.id in completed_ids:
+                    skipped_already_analyzed += 1
+                    continue
+
+                full_session = store.get_session(session.id)
+                if full_session is None:
+                    continue
+                if not is_session_substantive(full_session):
+                    skipped_non_substantive += 1
+                    if verbose:
+                        console.print(
+                            f"  [dim]-[/dim] skipped non-substantive: {session.id[:12]} "
+                            f"{(session.title or 'Untitled')[:50]}"
+                        )
+                    continue
+                llm_sessions.append(full_session)
+
+            for i in range(0, len(llm_sessions), batch_size):
+                chunk = llm_sessions[i:i + batch_size]
+                try:
+                    facets = analyze_sessions_llm_batch(chunk, backend_name=backend)
+                except Exception as e:
+                    if verbose:
+                        error_console.print(
+                            f"  [yellow]![/yellow] Batch failed ({len(chunk)} sessions): {e}"
+                        )
+                        error_console.print("  [dim]Falling back to per-session LLM calls for this batch[/dim]")
+                    facets = []
+                    for single_session in chunk:
+                        try:
+                            facets.append(analyze_session_llm(single_session, backend_name=backend))
+                        except Exception as single_err:
+                            errors += 1
+                            if verbose:
+                                error_console.print(
+                                    f"  [red]![/red] Failed: {single_session.id[:12]} - {single_err}"
+                                )
+
+                for facet_data in facets:
+                    try:
+                        store.upsert_facet(facet_data)
+                        analyzed += 1
+                        if verbose:
+                            console.print(
+                                f"  [green]+[/green] {facet_data['task_type']:12s} "
+                                f"{facet_data['outcome']:20s} "
+                                f"friction={facet_data['friction_score']:.2f}  "
+                                f"{(facet_data['brief_summary'] or '')[:50]}"
+                            )
+                    except Exception:
+                        errors += 1
+
+            console.print(f"\n[bold green]Analyzed {analyzed} session(s)[/bold green]", end="")
+            if skipped_already_analyzed:
+                console.print(
+                    f" [dim]({skipped_already_analyzed} skipped already-analyzed)[/dim]",
+                    end="",
+                )
+            if skipped_non_substantive:
+                console.print(f" [dim]({skipped_non_substantive} skipped non-substantive)[/dim]", end="")
+            if errors:
+                console.print(f" [yellow]({errors} errors)[/yellow]")
+            else:
+                console.print()
+            return
 
         for session in sessions:
             try:
@@ -1908,7 +2015,7 @@ def analyze_sessions(
                 if analyzer == "llm":
                     from sagg.analytics.insights.cli_llm import analyze_session_llm
 
-                    facet_data = analyze_session_llm(full_session, backend_name=llm_cli)
+                    facet_data = analyze_session_llm(full_session, backend_name=backend)
                 else:
                     from sagg.analytics.insights.heuristic import analyze_session
 
@@ -1931,6 +2038,8 @@ def analyze_sessions(
                     error_console.print(f"  [red]![/red] Failed: {session.id[:12]} - {e}")
 
         console.print(f"\n[bold green]Analyzed {analyzed} session(s)[/bold green]", end="")
+        if skipped_non_substantive:
+            console.print(f" [dim]({skipped_non_substantive} skipped non-substantive)[/dim]", end="")
         if errors:
             console.print(f" [yellow]({errors} errors)[/yellow]")
         else:

@@ -770,6 +770,7 @@ class SessionStore:
         self,
         since: datetime | None = None,
         source: str | None = None,
+        project: str | None = None,
         limit: int = 500,
     ) -> list[UnifiedSession]:
         """Get sessions that don't have facets yet.
@@ -777,6 +778,7 @@ class SessionStore:
         Args:
             since: Only sessions created after this datetime.
             source: Filter by source tool.
+            project: Filter by project path/name (partial match).
             limit: Maximum results.
 
         Returns:
@@ -792,6 +794,11 @@ class SessionStore:
         if source is not None:
             conditions.append("s.source = ?")
             params.append(source)
+
+        if project is not None:
+            conditions.append("(s.project_path LIKE ? OR s.project_name LIKE ?)")
+            params.append(f"%{project}%")
+            params.append(f"%{project}%")
 
         where_clause = " AND ".join(conditions)
 
