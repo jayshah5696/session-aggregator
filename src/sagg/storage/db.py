@@ -7,7 +7,7 @@ from pathlib import Path
 from types import TracebackType
 
 # Schema version for migrations
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # SQL statements for schema creation
 SCHEMA_SQL = """
@@ -267,6 +267,10 @@ class Database:
         if from_version < 3:
             self._migrate_v2_to_v3()
 
+        # Migration v3 -> v4: Add session facets and insights cache tables
+        if from_version < 4:
+            self._migrate_v3_to_v4()
+
     def _migrate_v1_to_v2(self) -> None:
         """Migrate schema from v1 to v2.
 
@@ -320,6 +324,68 @@ class Database:
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
             (3, int(time.time())),
+        )
+        conn.commit()
+
+    def _migrate_v3_to_v4(self) -> None:
+        """Migrate schema from v3 to v4.
+
+        Adds session_facets table for AI-analyzed session insights
+        and insights_cache table for cached aggregated reports.
+        """
+        import time
+
+        conn = self.connect()
+
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS session_facets (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                analyzed_at INTEGER NOT NULL,
+                analyzer_version TEXT NOT NULL,
+                analyzer_model TEXT,
+                underlying_goal TEXT NOT NULL,
+                goal_categories_json TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                completion_confidence REAL DEFAULT 0.5,
+                session_type TEXT NOT NULL,
+                complexity_score INTEGER DEFAULT 3,
+                friction_counts_json TEXT,
+                friction_detail TEXT,
+                friction_score REAL DEFAULT 0.0,
+                tools_helped_json TEXT,
+                tools_didnt_json TEXT,
+                tool_helpfulness TEXT,
+                primary_language TEXT,
+                files_pattern TEXT,
+                brief_summary TEXT NOT NULL,
+                key_decisions_json TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS insights_cache (
+                id TEXT PRIMARY KEY,
+                range_start INTEGER NOT NULL,
+                range_end INTEGER NOT NULL,
+                session_count INTEGER NOT NULL,
+                facet_count INTEGER NOT NULL,
+                report_json TEXT NOT NULL,
+                report_html TEXT,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_facets_source ON session_facets(source);
+            CREATE INDEX IF NOT EXISTS idx_facets_task_type ON session_facets(task_type);
+            CREATE INDEX IF NOT EXISTS idx_facets_outcome ON session_facets(outcome);
+            CREATE INDEX IF NOT EXISTS idx_facets_analyzed ON session_facets(analyzed_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_facets_language ON session_facets(primary_language);
+        """)
+
+        # Record schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (4, int(time.time())),
         )
         conn.commit()
 

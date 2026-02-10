@@ -11,6 +11,13 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 - **AgentTrace export**: Export to the [AgentTrace](https://agent-trace.dev) standard format
 - **Rich CLI**: Beautiful terminal output with Rich
 
+### New in v1.3
+
+- **`sagg analyze-sessions`**: Extract structured facets from sessions (heuristic or LLM-powered)
+- **`sagg insights`**: Cross-tool usage insights report — compare Claude vs Cursor vs OpenCode effectiveness
+- **LLM via CLI tools**: Uses `claude -p`, `codex`, or `gemini` CLI for analysis — no SDK dependencies
+- **AGENTS.md suggestions**: Auto-detect friction patterns and suggest config additions per tool
+
 ### New in v1.1
 
 - **`sagg sync --watch`**: Live filesystem watching for automatic session collection
@@ -126,6 +133,10 @@ sagg budget set --weekly 500k
 
 # Watch for new sessions in real-time
 sagg sync --watch
+
+# Analyze sessions and generate cross-tool insights
+sagg analyze-sessions --since 30d
+sagg insights
 ```
 
 ## Terminal UI (TUI)
@@ -392,6 +403,42 @@ sagg git-link --project myapp
 
 # Update session git info
 sagg git-link --update
+```
+
+### `sagg analyze-sessions`
+
+Extract structured facets from sessions for insights analysis.
+
+```bash
+# Analyze with heuristic (free, no LLM needed)
+sagg analyze-sessions --since 30d
+
+# Use LLM for higher quality (auto-detects claude/codex/gemini CLI)
+sagg analyze-sessions --analyzer llm
+
+# Re-analyze already analyzed sessions
+sagg analyze-sessions --since 7d --force
+
+# Preview what would be analyzed
+sagg analyze-sessions --dry-run
+```
+
+### `sagg insights`
+
+Generate cross-tool usage insights report. Requires `analyze-sessions` first.
+
+```bash
+# CLI summary report
+sagg insights
+
+# Compare specific tools
+sagg insights --source claude --source cursor
+
+# Export as JSON
+sagg insights --format json -o report.json
+
+# Detailed breakdown
+sagg insights --verbose
 ```
 
 ### `sagg friction-points`
