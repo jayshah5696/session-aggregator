@@ -25,6 +25,7 @@ class SourceTool(str, Enum):
     GEMINI = "gemini"
     ANTIGRAVITY = "antigravity"
     AMPCODE = "ampcode"
+    PI = "pi"
 
 
 class TokenUsage(BaseModel):

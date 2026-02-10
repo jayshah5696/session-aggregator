@@ -7,6 +7,7 @@ from sagg.adapters.codex import CodexAdapter
 from sagg.adapters.cursor import CursorAdapter
 from sagg.adapters.gemini import GeminiCliAdapter
 from sagg.adapters.opencode import OpenCodeAdapter
+from sagg.adapters.pi import PiAdapter
 from sagg.adapters.registry import AdapterRegistry, registry
 
 # Register all adapters
@@ -16,6 +17,7 @@ registry.register(CodexAdapter())
 registry.register(CursorAdapter())
 registry.register(AmpcodeAdapter())
 registry.register(GeminiCliAdapter())
+registry.register(PiAdapter())
 
 __all__ = [
     "AdapterRegistry",
@@ -25,6 +27,7 @@ __all__ = [
     "CursorAdapter",
     "GeminiCliAdapter",
     "OpenCodeAdapter",
+    "PiAdapter",
     "SessionAdapter",
     "SessionRef",
     "registry",
