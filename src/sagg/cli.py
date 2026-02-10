@@ -283,6 +283,133 @@ def cli() -> None:
 
 
 @cli.command()
+@click.option("--force", is_flag=True, help="Overwrite existing configuration")
+@click.option("--dry-run", is_flag=True, help="Preview without making changes")
+def init(force: bool, dry_run: bool) -> None:
+    """Setup wizard that auto-detects installed AI tools.
+
+    Scans your system for known AI coding tools (Claude Code, OpenCode, Cursor, etc.),
+    generates a configuration file, and initializes the database.
+    """
+    from pathlib import Path
+    from rich.prompt import Confirm
+    from sagg.adapters import registry
+    from sagg.storage import SessionStore
+
+    config_path = Path.home() / ".sagg" / "config.toml"
+
+    if config_path.exists() and not force and not dry_run:
+        console.print(f"[yellow]Configuration file already exists at {config_path}[/yellow]")
+        if not Confirm.ask("Do you want to overwrite it?"):
+            console.print("[dim]Aborted.[/dim]")
+            return
+
+    console.print("[bold]Looking for AI tools...[/bold]\n")
+
+    found_tools = []
+    adapters = registry.list_adapters()
+
+    for adapter in adapters:
+        if adapter.is_available():
+            default_path = adapter.get_default_path()
+
+            # Count sessions (with spinner as it might take time)
+            session_count: int | str = 0
+            with console.status(f"Scanning {adapter.display_name} sessions..."):
+                try:
+                    sessions = adapter.list_sessions()
+                    session_count = len(sessions)
+                except Exception as e:
+                    # Fallback if scanning fails but folder exists
+                    session_count = "?"
+                    error_console.print(f"[dim]Error scanning {adapter.name}: {e}[/dim]")
+
+            console.print(
+                f"✅ Found [cyan]{adapter.display_name}[/cyan]: {default_path} ({session_count} sessions)"
+            )
+            found_tools.append((adapter, default_path, session_count))
+        else:
+            console.print(
+                f"❌ [dim]{adapter.display_name}: not installed (or not in default location)[/dim]"
+            )
+
+    console.print()
+
+    if not found_tools:
+        console.print("[yellow]No AI tools found in default locations.[/yellow]")
+        if not dry_run and not Confirm.ask("Do you want to create a configuration file anyway?"):
+            return
+
+    # Ask which ones to enable
+    enabled_sources = {}
+
+    # Pre-populate with found tools
+    for adapter, path, _ in found_tools:
+        if dry_run or Confirm.ask(f"Enable {adapter.display_name}?", default=True):
+            enabled_sources[adapter.name] = {"enabled": True, "path": str(path)}
+        else:
+            enabled_sources[adapter.name] = {"enabled": False, "path": str(path)}
+
+    # Add disabled entries for not found tools (so they appear in config but disabled)
+    found_names = {a.name for a, _, _ in found_tools}
+    for adapter in adapters:
+        if adapter.name not in found_names:
+            enabled_sources[adapter.name] = {
+                "enabled": False,
+                "path": str(adapter.get_default_path()),
+            }
+
+    # Generate config content
+    config_lines = []
+    for source_name, config in enabled_sources.items():
+        config_lines.append(f"[sources.{source_name}]")
+        config_lines.append(f"enabled = {str(config['enabled']).lower()}")
+        # Escape path for TOML (basic escaping)
+        path_str = config["path"].replace("\\", "\\\\").replace('"', '\\"')
+        config_lines.append(f'path = "{path_str}"')
+        config_lines.append("")
+
+    # Add default sections
+    config_lines.append("[viewer]")
+    config_lines.append("port = 3000")
+    config_lines.append("open_browser = true")
+    config_lines.append("")
+
+    config_lines.append("[export]")
+    config_lines.append('default_format = "agenttrace"')
+    config_lines.append('output_dir = "~/.sagg/exports"')
+
+    config_content = "\n".join(config_lines)
+
+    if dry_run:
+        console.print("\n[bold]Generated Configuration (Dry Run):[/bold]")
+        syntax = Syntax(config_content, "toml", theme="monokai", line_numbers=False)
+        console.print(Panel(syntax, title="config.toml", border_style="blue"))
+        console.print("[dim]Skipping file write and database initialization.[/dim]")
+    else:
+        # Create directory
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write config
+        config_path.write_text(config_content)
+        console.print(f"\n[green]Created {config_path}[/green]")
+
+        # Initialize database
+        with console.status("Initializing database..."):
+            try:
+                # Just instantiating the store initializes the DB
+                store = SessionStore()
+                store.close()
+            except Exception as e:
+                error_console.print(f"[red]Error initializing database:[/red] {e}")
+
+        console.print("[green]Database initialized successfully[/green]")
+
+        console.print("\n[bold]Setup complete![/bold]")
+        console.print("Run 'sagg collect' to import your sessions.")
+
+
+@cli.command()
 @click.option("--source", "-s", type=str, help="Collect from specific source only")
 @click.option("--since", type=str, help="Only sessions from last N days (e.g., 7d, 2w)")
 def collect(source: str | None, since: str | None) -> None:
