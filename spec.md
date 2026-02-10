@@ -11,7 +11,7 @@
 
 ### 1.1 Problem Statement
 
-Developers using multiple AI coding tools (OpenCode, Claude Code, Codex, Cursor, Ampcode, Gemini CLI, Antigravity) have session data scattered across different locations in incompatible formats. There is no unified way to:
+Developers using multiple AI coding tools (OpenCode, Claude Code, Codex, Cursor, Ampcode, Gemini CLI, Antigravity, Pi Coding Agent) have session data scattered across different locations in incompatible formats. There is no unified way to:
 - View all sessions in one place
 - Search across sessions from different tools
 - Convert sessions to a standard format (AgentTrace)
@@ -167,7 +167,7 @@ interface TokenUsage {
   cachedTokens?: number;
 }
 
-type SourceTool = 'opencode' | 'claude' | 'codex' | 'cursor' | 'gemini' | 'ampcode' | 'antigravity';
+type SourceTool = 'opencode' | 'claude' | 'codex' | 'cursor' | 'gemini' | 'ampcode' | 'antigravity' | 'pi';
 ```
 
 ### 3.2 SQLite Schema (Metadata + Search)
@@ -315,6 +315,10 @@ path = "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
 [sources.gemini]
 enabled = true
 path = "~/.gemini/tmp"
+
+[sources.pi]
+enabled = true
+path = "~/.pi/agent/sessions"
 
 [sources.antigravity]
 enabled = false  # Format not documented yet
@@ -558,7 +562,28 @@ type MessageRecord =
 - Sessions are per-project and stored under a hashed project directory.
 - Full project path is not stored directly; `directories` is used as best-effort.
 
-### 5.8 Antigravity Adapter (Research Only)
+### 5.8 Pi Coding Agent Adapter
+
+**Input**: `~/.pi/agent/sessions/`
+
+**Session Files**: `--<encoded-path>--/<timestamp>.jsonl`
+
+**Mapping**:
+| Pi | Unified |
+|----|---------|
+| `session_file_name` | `sourceId` |
+| Directory name | `projectPath` (decoded) |
+| `message.role` | `message.role` |
+| `message.content` | `part.type: text` |
+| `tool_calls[]` | `part.type: tool_call` |
+| `usage` | `usage.inputTokens` / `usage.outputTokens` |
+
+**Key Notes**:
+- Sessions stored as JSONL.
+- Paths encoded by replacing `/` with `-` and wrapping in dashes.
+- Tree structure (id/parentId) flattened chronologically.
+
+### 5.9 Antigravity Adapter (Research Only)
 
 **Status**: **DEPRIORITIZED**. Research indicates high risk due to proprietary binary formats.
 
@@ -965,6 +990,7 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 | Codex | Working | From `session_meta.cwd` | From first user message | Provider only |
 | Cursor | Working | From `fileSelections.uri.path` | From first user message | Not available |
 | Ampcode | Working | From `system.init.cwd` | From first user message | Limited |
+| Pi Coding Agent | Working | From directory name | From first user message | Full (per-message) |
 | Antigravity | Research Complete | From `brain/` artifacts | From `task.md.metadata.json` | Limited (quota API) |
 
 ### Known Limitations

@@ -40,6 +40,7 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 | Cursor | Supported | Platform-specific SQLite database |
 | Gemini CLI | Supported | `~/.gemini/tmp/` |
 | Ampcode | Supported | Cloud-based (capture via `--stream-json`) |
+| Pi Coding Agent | Supported | `~/.pi/agent/sessions/` |
 
 ## Installation
 

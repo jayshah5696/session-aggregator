@@ -1,6 +1,16 @@
 """Pi Coding Agent session adapter.
 
 Parses sessions from Pi Coding Agent's JSONL format stored in ~/.pi/agent/sessions/.
+
+Structure details derived from:
+- https://medium.com/@shivam.agarwal.in/agentic-ai-pi-anatomy-of-a-minimal-coding-agent-powering-openclaw-5ecd4dd6b440
+- https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/session.md
+
+Key observations:
+- Sessions are stored in `~/.pi/agent/sessions/`.
+- Paths are encoded as `--<path>--` (replacing / with -).
+- Files are JSONL.
+- Messages form a tree structure (id/parentId), but we flatten them chronologically.
 """
 
 from __future__ import annotations
