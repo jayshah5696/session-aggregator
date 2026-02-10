@@ -13,6 +13,7 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 
 ### New in v1.3
 
+- **`sagg init`**: Setup wizard that auto-detects installed AI tools and generates configuration
 - **`sagg analyze-sessions`**: Extract structured facets from sessions (heuristic or LLM-powered)
 - **`sagg insights`**: Cross-tool usage insights report — compare Claude vs Cursor vs OpenCode effectiveness
 - **LLM via CLI tools**: Uses `claude -p`, `codex`, or `gemini` CLI for analysis — no SDK dependencies
@@ -100,8 +101,8 @@ To add support for a new tool:
 ## Quick Start
 
 ```bash
-# Check which tools are available on your system
-sagg sources
+# Setup wizard - auto-detects tools and creates config
+sagg init
 
 # Collect sessions from all available tools (last 7 days)
 sagg collect --since 7d
@@ -194,6 +195,21 @@ sagg tui
 | `q` | Quit |
 
 ## Commands
+
+### `sagg init`
+
+Setup wizard that scans your system for known AI coding tools (Claude Code, OpenCode, Cursor, etc.), generates a `config.toml`, and initializes the database.
+
+```bash
+# Run the setup wizard
+sagg init
+
+# Overwrite existing configuration
+sagg init --force
+
+# Preview configuration without making changes
+sagg init --dry-run
+```
 
 ### `sagg tui`
 
