@@ -183,7 +183,7 @@ class DetailView(Static):
 
         return Group(*parts)
 
-    def _render_tool_call(self, part: "ToolCallPart") -> Panel:
+    def _render_tool_call(self, part: ToolCallPart) -> Panel:
         """Render a tool call part.
 
         Args:
@@ -192,7 +192,6 @@ class DetailView(Static):
         Returns:
             Rich Panel with tool call details.
         """
-        from sagg.models import ToolCallPart
 
         title_text = Text()
         title_text.append(" ", style="#d29922")
@@ -244,7 +243,7 @@ class DetailView(Static):
             padding=(0, 1),
         )
 
-    def _render_tool_result(self, part: "ToolResultPart") -> Panel:
+    def _render_tool_result(self, part: ToolResultPart) -> Panel:
         """Render a tool result part.
 
         Args:
@@ -253,7 +252,6 @@ class DetailView(Static):
         Returns:
             Rich Panel with tool result details.
         """
-        from sagg.models import ToolResultPart
 
         # Determine style based on error status
         if part.is_error:
@@ -311,7 +309,7 @@ class DetailView(Static):
             padding=(0, 1),
         )
 
-    def _render_file_change(self, part: "FileChangePart") -> Panel:
+    def _render_file_change(self, part: FileChangePart) -> Panel:
         """Render a file change part.
 
         Args:
@@ -320,7 +318,6 @@ class DetailView(Static):
         Returns:
             Rich Panel with file change details.
         """
-        from sagg.models import FileChangePart
 
         title_text = Text()
         title_text.append(" ", style="#58a6ff")
@@ -356,13 +353,12 @@ class DetailView(Static):
         )
         self.update(placeholder)
 
-    def show_session_info(self, session: "UnifiedSession") -> None:
+    def show_session_info(self, session: UnifiedSession) -> None:
         """Display session summary information.
 
         Args:
             session: Session to display summary for.
         """
-        from sagg.models import UnifiedSession
 
         from rich.console import Group
         from rich.table import Table
