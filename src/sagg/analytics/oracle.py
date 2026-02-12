@@ -64,6 +64,9 @@ def search_history(
 
     results: list[OracleResult] = []
 
+    # Pre-compile the search pattern for efficiency
+    search_pattern = re.compile(re.escape(query), re.IGNORECASE)
+
     for session, raw_rank in search_results:
         # FTS5 rank is negative (more negative = better match)
         # Convert to 0-1 scale where 1 is best
@@ -84,11 +87,11 @@ def search_history(
 
         # Get the matched text snippet from session content
         content = session.extract_text_content()
-        matched_text = extract_snippet(content, query, context_chars=100)
+        matched_text = extract_snippet(content, search_pattern, context_chars=100)
 
         # Fall back to title if no content match
         if not matched_text and session.title:
-            matched_text = extract_snippet(session.title, query, context_chars=50)
+            matched_text = extract_snippet(session.title, search_pattern, context_chars=50)
 
         # If still no match, just show beginning of content
         if not matched_text:
@@ -112,22 +115,28 @@ def search_history(
     return results[:limit]
 
 
-def extract_snippet(content: str, query: str, context_chars: int = 100) -> str:
+def extract_snippet(content: str, query: str | re.Pattern, context_chars: int = 100) -> str:
     """Extract a text snippet around the match.
 
     Args:
         content: The full text content to search.
-        query: The search query to find.
+        query: The search query to find (string or compiled regex pattern).
         context_chars: Number of characters to show before and after the match.
 
     Returns:
         A snippet of text with the match and surrounding context.
     """
-    if not content or not query:
+    if not content:
         return ""
 
-    # Try case-insensitive search
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    if isinstance(query, re.Pattern):
+        pattern = query
+    elif query:
+        # Try case-insensitive search
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+    else:
+        return ""
+
     match = pattern.search(content)
 
     if not match:
