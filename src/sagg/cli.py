@@ -2017,9 +2017,9 @@ def analyze_sessions(
 
                     facet_data = analyze_session_llm(full_session, backend_name=backend)
                 else:
-                    from sagg.analytics.insights.heuristic import analyze_session
+                    from sagg.analytics.insights.extractors import extract_facet
 
-                    facet_data = analyze_session(full_session)
+                    facet_data = extract_facet(full_session)
 
                 store.upsert_facet(facet_data)
                 analyzed += 1
@@ -2134,7 +2134,26 @@ def insights(
                 console.print(json_output)
 
         elif output_format == "html":
-            console.print("[yellow]HTML export coming soon. Use --format json for now.[/yellow]")
+            from sagg.export.html_report import render_html_report
+
+            html_output = render_html_report(report)
+            if output:
+                with open(output, "w") as f:
+                    f.write(html_output)
+                console.print(f"[green]HTML report saved to {output}[/green]")
+            else:
+                # Default location
+                import os
+
+                reports_dir = os.path.expanduser("~/.sagg/reports")
+                os.makedirs(reports_dir, exist_ok=True)
+                from datetime import datetime as dt
+
+                filename = f"insights-{dt.now().strftime('%Y%m%d-%H%M%S')}.html"
+                filepath = os.path.join(reports_dir, filename)
+                with open(filepath, "w") as f:
+                    f.write(html_output)
+                console.print(f"[green]HTML report saved to {filepath}[/green]")
 
         else:
             # CLI output

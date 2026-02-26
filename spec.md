@@ -939,8 +939,11 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 ### v1.3 - IN PROGRESS (Insights & Smart Features)
 - [x] `sagg analyze-sessions` - Extract per-session facets via heuristic or LLM (§13.7) — Implemented Feb 5, 2026
 - [x] `sagg insights` - Cross-tool usage insights CLI report (§13.7) — Implemented Feb 5, 2026
-- [ ] `sagg insights --format html` - HTML export for insights report (§13.7)
+- [x] `sagg analyze-sessions` v2 - Extensible 10-extractor pipeline with ~40 attributes per session (§13.7.1) — Implemented Feb 25, 2026
+- [x] `sagg insights --format html` - Standalone HTML report with inline CSS, dark mode, copy buttons (§13.7.1) — Implemented Feb 25, 2026
+- [x] DB migration v4→v5 - `facet_json` column for full extractor output (§13.7.1) — Implemented Feb 25, 2026
 - [ ] `sagg insights` TUI view - Tabbed Textual interface with drill-down (§13.7)
+- [ ] LLM map-reduce layer - Batch facet JSONs for narrative generation (§13.7.1)
 - [ ] `sagg init` - setup wizard that detects your tools
 - [ ] Tool benchmarking - track which AI works best for what
 - [ ] `sagg benchmark` - get recommendations based on your actual usage
@@ -2188,7 +2191,7 @@ $ sagg insights --since 7d --format json > weekly-insights.json
 
 ### 13.7.1 Insights v2: Extensible Heuristic Pipeline + LLM Map-Reduce
 
-**Status**: Planned (replaces heuristic_v1 + current aggregator)
+**Status**: Phase A-D COMPLETE (Feb 25, 2026); Phase E (LLM map-reduce) planned
 **Motivation**: The v1 heuristic analyzer extracts shallow signals (keyword matching on first user message, turn count thresholds, aggregate retry/error counts). Every trace contains rich structured data — tool calls, error results, user corrections, timing, file patterns — that can produce actionable insights *without any LLM*. The LLM layer should be a cherry on top, not a prerequisite for a useful report.
 
 #### Design Principles
@@ -2684,10 +2687,11 @@ sagg insights --format json -o data.json
 
 #### Implementation Phases
 
-**Phase A**: Feature extractor pipeline + 10 extractors → replaces `heuristic.py`
-**Phase B**: Aggregator v2 → replaces `aggregator.py` (fixes bugs, uses full facet_json)
-**Phase C**: HTML report generator → replaces "coming soon" stub
-**Phase D**: LLM map-reduce layer → replaces current per-session LLM approach
+**Phase A**: Feature extractor pipeline + 10 extractors → `extractors.py` — DONE (71 tests)
+**Phase B**: DB migration v4→v5 + store update for `facet_json` — DONE (28 tests)
+**Phase C**: HTML report generator → `html_report.py` — DONE (17 tests)
+**Phase D**: CLI wiring (analyze-sessions uses v2 extractors, insights --format html works) — DONE
+**Phase E**: LLM map-reduce layer → replaces current per-session LLM approach — PLANNED
 
 #### Success Criteria (v2)
 

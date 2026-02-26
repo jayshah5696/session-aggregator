@@ -7,7 +7,7 @@ from pathlib import Path
 from types import TracebackType
 
 # Schema version for migrations
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # SQL statements for schema creation
 SCHEMA_SQL = """
@@ -271,6 +271,10 @@ class Database:
         if from_version < 4:
             self._migrate_v3_to_v4()
 
+        # Migration v4 -> v5: Add facet_json column for full extractor output
+        if from_version < 5:
+            self._migrate_v4_to_v5()
+
     def _migrate_v1_to_v2(self) -> None:
         """Migrate schema from v1 to v2.
 
@@ -386,6 +390,29 @@ class Database:
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
             (4, int(time.time())),
+        )
+        conn.commit()
+
+    def _migrate_v4_to_v5(self) -> None:
+        """Migrate schema from v4 to v5.
+
+        Adds facet_json column to session_facets for storing the complete
+        extractor output as JSON. Existing typed columns remain for indexed
+        queries; facet_json is the source of truth for aggregation.
+        """
+        import time
+
+        conn = self.connect()
+
+        # Add facet_json column (TEXT, nullable for existing rows)
+        conn.execute(
+            "ALTER TABLE session_facets ADD COLUMN facet_json TEXT"
+        )
+
+        # Record schema version
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (5, int(time.time())),
         )
         conn.commit()
 
