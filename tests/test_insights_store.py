@@ -52,10 +52,10 @@ def make_facet(
 # ---------------------------------------------------------------------------
 
 class TestSchemaVersion:
-    """Verify the v4 migration creates expected tables and indexes."""
+    """Verify the v5 migration creates expected tables and indexes."""
 
-    def test_schema_version_is_4(self):
-        assert SCHEMA_VERSION == 4
+    def test_schema_version_is_5(self):
+        assert SCHEMA_VERSION == 5
 
     def test_migration_creates_facets_table(self, session_store):
         cursor = session_store._db.execute(
@@ -457,3 +457,47 @@ class TestFacetCascadeDelete:
 
         # Facet should be gone
         assert session_store.get_facet(sample_session.id) is None
+
+
+# ---------------------------------------------------------------------------
+# 8. facet_json column (v5 migration)
+# ---------------------------------------------------------------------------
+
+class TestFacetJsonColumn:
+    """Verify the v5 migration adds facet_json and it round-trips correctly."""
+
+    def test_facet_json_column_exists(self, session_store):
+        cursor = session_store._db.execute("PRAGMA table_info(session_facets)")
+        columns = {row["name"] for row in cursor}
+        assert "facet_json" in columns
+
+    def test_upsert_stores_facet_json(self, session_store, sample_session):
+        session_store.save_session(sample_session)
+        facet = make_facet(sample_session.id)
+        facet["tool_calls_total"] = 42
+        facet["error_rate"] = 0.15
+        session_store.upsert_facet(facet)
+
+        cursor = session_store._db.execute(
+            "SELECT facet_json FROM session_facets WHERE session_id = ?",
+            (sample_session.id,),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        assert row["facet_json"] is not None
+
+        parsed = json.loads(row["facet_json"])
+        assert parsed["tool_calls_total"] == 42
+        assert parsed["error_rate"] == 0.15
+
+    def test_get_facet_includes_facet_json(self, session_store, sample_session):
+        session_store.save_session(sample_session)
+        facet = make_facet(sample_session.id)
+        facet["intervention_count"] = 5
+        session_store.upsert_facet(facet)
+
+        result = session_store.get_facet(sample_session.id)
+        assert result is not None
+        assert "facet_json" in result
+        assert isinstance(result["facet_json"], dict)
+        assert result["facet_json"]["intervention_count"] == 5

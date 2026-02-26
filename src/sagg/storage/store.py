@@ -660,6 +660,9 @@ class SessionStore:
         """
         import json as _json
 
+        # Serialize the full facet dict as facet_json
+        facet_json = _json.dumps(facet_data, default=str)
+
         self._db.execute(
             """
             INSERT OR REPLACE INTO session_facets (
@@ -670,8 +673,9 @@ class SessionStore:
                 friction_counts_json, friction_detail, friction_score,
                 tools_helped_json, tools_didnt_json, tool_helpfulness,
                 primary_language, files_pattern,
-                brief_summary, key_decisions_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                brief_summary, key_decisions_json,
+                facet_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 facet_data["session_id"],
@@ -696,6 +700,7 @@ class SessionStore:
                 facet_data.get("files_pattern"),
                 facet_data.get("brief_summary", ""),
                 _json.dumps(facet_data.get("key_decisions", [])),
+                facet_json,
             ),
         )
         self._db.commit()
@@ -875,6 +880,7 @@ class SessionStore:
             "files_pattern": row["files_pattern"],
             "brief_summary": row["brief_summary"],
             "key_decisions": json.loads(row["key_decisions_json"]) if row["key_decisions_json"] else [],
+            "facet_json": json.loads(row["facet_json"]) if row["facet_json"] else None,
         }
 
     # Budget management methods

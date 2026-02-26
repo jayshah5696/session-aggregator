@@ -13,7 +13,8 @@ Unified AI Coding Session Aggregator - collect, search, and export sessions from
 
 ### New in v1.3
 
-- **`sagg analyze-sessions`**: Extract structured facets from sessions (heuristic or LLM-powered)
+- **`sagg analyze-sessions`** (v2): Extensible 10-extractor pipeline producing ~40 attributes per session — tool call stats, error analysis, user intervention detection, timing, conversation patterns, and more
+- **`sagg insights --format html`**: Standalone HTML report with inline CSS, dark mode, CSS bar charts, and copy buttons — no external dependencies
 - **`sagg insights`**: Cross-tool usage insights report — compare Claude vs Cursor vs OpenCode effectiveness
 - **LLM via CLI tools**: Uses `claude -p`, `codex`, or `gemini` CLI for analysis — no SDK dependencies
 - **AGENTS.md suggestions**: Auto-detect friction patterns and suggest config additions per tool
@@ -434,6 +435,9 @@ sagg insights
 # Compare specific tools
 sagg insights --source claude --source cursor
 
+# Generate standalone HTML report
+sagg insights --format html -o report.html
+
 # Export as JSON
 sagg insights --format json -o report.json
 
@@ -592,18 +596,25 @@ session-aggregator/
 │   │   └── store.py        # Session store
 │   ├── export/             # Export formats
 │   │   ├── agenttrace.py   # AgentTrace exporter
+│   │   ├── html_report.py  # Standalone HTML insights report
 │   │   └── markdown.py     # Markdown exporter
 │   ├── analytics/          # Analysis features
 │   │   ├── oracle.py       # History search
 │   │   ├── similar.py      # Similarity matching
 │   │   ├── friction.py     # Friction detection
-│   │   └── heatmap.py      # Activity heatmap
+│   │   ├── heatmap.py      # Activity heatmap
+│   │   └── insights/       # Insights pipeline
+│   │       ├── extractors.py  # V2 10-extractor pipeline
+│   │       ├── heuristic.py   # V1 heuristic analyzer
+│   │       ├── cli_llm.py     # LLM analyzer via CLI tools
+│   │       ├── aggregator.py  # Report aggregation
+│   │       └── models.py      # Facet/report data models
 │   ├── security/           # Data protection
 │   │   └── scrubber.py     # Sensitive data redaction
 │   └── tui/                # Terminal UI
 │       ├── app.py          # Main Textual app
 │       └── widgets/        # UI components
-└── tests/                  # Test files (170+ tests)
+└── tests/                  # Test files (380+ tests)
 ```
 
 ## License
