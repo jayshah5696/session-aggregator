@@ -946,6 +946,14 @@ Source badges: `[OC]` OpenCode, `[CC]` Claude Code, `[CX]` Codex, `[CU]` Cursor
 - [ ] `sagg benchmark` - get recommendations based on your actual usage
 - [ ] Smart routing - suggest the best tool for each task
 
+### v1.4 - PLANNED (Knowledge Base)
+- [ ] `sagg learn` - Auto-extract patterns and skills from session history (§20)
+- [ ] `sagg knowledge` - View, search, and export accumulated knowledge (§20)
+- [ ] Pattern memory - bounded, curated, auto-populated from cross-session analysis (§20.5)
+- [ ] Skill library - procedural skills extracted from successful workflows (§20.6)
+- [ ] Project profiles - per-project conventions and tool preferences (§20.4)
+- [ ] `sagg knowledge suggest-rules` - Generate AGENTS.md additions from learned patterns (§20.13)
+
 ### Future
 - [ ] Session replay/debugging mode
 - [ ] Line-level AgentTrace attribution with git integration
@@ -2178,6 +2186,521 @@ $ sagg insights --since 7d --format json > weekly-insights.json
 
 ---
 
+### 13.7.1 Insights v2: Extensible Heuristic Pipeline + LLM Map-Reduce
+
+**Status**: Planned (replaces heuristic_v1 + current aggregator)
+**Motivation**: The v1 heuristic analyzer extracts shallow signals (keyword matching on first user message, turn count thresholds, aggregate retry/error counts). Every trace contains rich structured data — tool calls, error results, user corrections, timing, file patterns — that can produce actionable insights *without any LLM*. The LLM layer should be a cherry on top, not a prerequisite for a useful report.
+
+#### Design Principles
+
+1. **Exhaust heuristics first.** Extract every computable signal from the structured trace data. The heuristic layer alone should produce a report worth reading.
+2. **Extensible feature pipeline.** Adding a new signal means writing one function and registering it. Re-running `analyze-sessions --force` recomputes all facets with the new feature.
+3. **LLM as map-reduce.** Batch facet JSONs into groups of 10-20, process in parallel, then reduce to a final narrative. LLM adds interpretation, not raw data.
+4. **Structured HTML output.** The final report is a standalone HTML file with all data inline — no external deps, shareable, actionable.
+
+#### Architecture
+
+```
+                    ┌─────────────────────────┐
+                    │    UnifiedSession        │
+                    │  (turns/messages/parts)  │
+                    └───────────┬──────────────┘
+                                │
+                    ┌───────────▼──────────────┐
+                    │   Feature Extractor       │
+                    │   Pipeline (registry)     │
+                    │                           │
+                    │  ┌─ tool_call_stats ──┐   │
+                    │  ├─ error_analysis ───┤   │
+                    │  ├─ intervention ─────┤   │
+                    │  ├─ timing ───────────┤   │
+                    │  ├─ file_patterns ────┤   │
+                    │  ├─ token_usage ──────┤   │
+                    │  ├─ conversation_flow ┤   │
+                    │  ├─ outcome_signals ──┤   │
+                    │  └─ (add new here) ───┘   │
+                    └───────────┬──────────────┘
+                                │
+                    ┌───────────▼──────────────┐
+                    │   SessionFacetV2 (JSON)   │
+                    │   ~40 attributes per      │
+                    │   session, all computed    │
+                    └───────────┬──────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                   │
+    ┌─────────▼──────┐  ┌──────▼───────┐  ┌───────▼────────┐
+    │   Heuristic     │  │  LLM Layer   │  │   HTML Report   │
+    │   Aggregator    │  │  (map-reduce) │  │   Generator     │
+    │   (always runs) │  │  (opt-in)    │  │                 │
+    └─────────┬──────┘  └──────┬───────┘  └───────▲────────┘
+              │                 │                   │
+              └─────────────────┴───────────────────┘
+                        InsightsReportV2
+```
+
+#### Feature Extractor Registry
+
+Each feature extractor is a function that takes a `UnifiedSession` and returns a dict. Extractors are registered in a list. The pipeline runs all of them and merges results into the facet.
+
+```python
+from typing import Protocol
+
+class FeatureExtractor(Protocol):
+    """A single heuristic feature extractor."""
+    name: str
+    version: str
+
+    def extract(self, session: UnifiedSession) -> dict:
+        """Extract features from a session. Returns a flat or nested dict."""
+        ...
+
+# Registry — just a list. Add new extractors here.
+EXTRACTORS: list[FeatureExtractor] = [
+    ToolCallStatsExtractor(),
+    ErrorAnalysisExtractor(),
+    InterventionExtractor(),
+    TimingExtractor(),
+    FilePatternExtractor(),
+    TokenUsageExtractor(),
+    ConversationFlowExtractor(),
+    OutcomeSignalsExtractor(),
+    GoalClassificationExtractor(),
+    ComplexityExtractor(),
+]
+
+def extract_facet(session: UnifiedSession) -> dict:
+    """Run all extractors and merge into a single facet dict."""
+    facet = {"session_id": session.id, "source": session.source.value}
+    for extractor in EXTRACTORS:
+        facet.update(extractor.extract(session))
+    facet["analyzer_version"] = f"heuristic_v2"
+    facet["extractor_versions"] = {e.name: e.version for e in EXTRACTORS}
+    return facet
+```
+
+**To add a new feature**: Write a class with `name`, `version`, `extract()`. Append to `EXTRACTORS`. Run `sagg analyze-sessions --force` to recompute.
+
+#### Feature Extractors: Complete Catalog
+
+##### 1. `ToolCallStatsExtractor` — What tools were used and how
+
+Walks every `Message.parts` looking for `ToolCallPart` instances.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `tool_calls_total` | `int` | Total tool call count |
+| `tool_calls_by_name` | `dict[str, int]` | Per-tool call counts (`{Edit: 12, Read: 18, Bash: 9}`) |
+| `tool_call_sequence` | `list[str]` | Ordered list of tool names as called (for pattern detection) |
+| `unique_tools_used` | `int` | Number of distinct tools |
+| `most_used_tool` | `str` | Tool with highest call count |
+| `tool_diversity_ratio` | `float` | `unique_tools / total_calls` — high = exploratory, low = focused |
+| `read_write_ratio` | `float` | `(Read+Grep+Glob) / (Edit+Write+Bash)` — >1 = exploration, <1 = modification |
+
+**Adapter availability**: Claude (full), OpenCode (full), Codex (partial — no results), Cursor (none — text only), Gemini (full), Ampcode (full).
+
+##### 2. `ErrorAnalysisExtractor` — What went wrong
+
+Walks every `Message.parts` looking for `ToolResultPart` where `is_error=True`. Correlates back to the `ToolCallPart` that triggered it using `tool_id`.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `tool_results_total` | `int` | Total tool result count |
+| `tool_errors_total` | `int` | Count of `ToolResultPart` with `is_error=True` |
+| `error_rate` | `float` | `errors / total_results` (0.0–1.0) |
+| `errors_by_tool` | `dict[str, int]` | Per-tool error counts (`{Bash: 3, Edit: 1}`) |
+| `error_details` | `list[ErrorDetail]` | Up to 10 most significant errors |
+| `first_error_turn_index` | `int\|None` | Which turn the first error occurred in |
+| `error_free_streak_max` | `int` | Longest consecutive successful tool calls |
+| `error_clustering` | `str` | `"early"` / `"middle"` / `"late"` / `"scattered"` — where errors concentrate |
+| `error_recovery_rate` | `float` | Fraction of errors followed by a successful call to the same tool |
+
+```python
+class ErrorDetail:
+    tool_name: str
+    tool_id: str
+    input_preview: str     # First 100 chars of tool input
+    error_preview: str     # First 200 chars of error output
+    turn_index: int
+    recovered: bool        # Was the same tool called successfully later?
+```
+
+**Adapter availability**: Claude (full), OpenCode (full), Codex (no — missing ToolResultPart), Cursor (no), Gemini (full), Ampcode (full). For Codex/Cursor, `tool_errors_total` will be 0 and fields will have safe defaults.
+
+##### 3. `InterventionExtractor` — When the user corrected the agent
+
+Detects user messages that are *corrections* or *redirections*. A user message is classified as an intervention when:
+- It follows an assistant message that contained a tool error
+- It is short (<100 chars) and contains correction language ("no", "don't", "instead", "wrong", "stop", "actually", "rather", "use X not Y")
+- It follows an assistant message and precedes a different approach (tool name change)
+
+| Output Key | Type | Description |
+|---|---|---|
+| `intervention_count` | `int` | Total user corrections/redirections |
+| `intervention_details` | `list[InterventionDetail]` | Up to 10 intervention records |
+| `intervention_rate` | `float` | `interventions / user_messages` (0.0–1.0) |
+| `post_error_interventions` | `int` | Interventions that directly followed a tool error |
+| `proactive_redirections` | `int` | Interventions where user preemptively changed direction (no prior error) |
+
+```python
+class InterventionDetail:
+    turn_index: int
+    user_text: str           # The correction message (full text)
+    trigger: str             # "post_error" | "proactive" | "rejection"
+    preceding_tool: str|None # What tool was used before the intervention
+    following_tool: str|None # What tool was used after the intervention
+```
+
+##### 4. `TimingExtractor` — Session and turn timing patterns
+
+Uses `Turn.started_at` / `Turn.ended_at` and `Message.timestamp`.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `session_duration_ms` | `int\|None` | From `UnifiedSession.duration_ms` or computed from first/last turn |
+| `avg_turn_duration_ms` | `float\|None` | Average time per turn |
+| `max_turn_duration_ms` | `int\|None` | Longest single turn (indicator of complexity or stuck) |
+| `time_to_first_tool_call_ms` | `int\|None` | How quickly the agent started working |
+| `time_to_first_error_ms` | `int\|None` | How early the first problem hit |
+| `active_time_ratio` | `float\|None` | Ratio of sum-of-turn-durations to total session duration (gaps = user thinking) |
+
+**Adapter availability**: Claude (full timestamps), OpenCode (full), Codex (has timestamps), Cursor (degraded — session-level only), Gemini (full), Ampcode (no — uses `datetime.now()`). For adapters with degraded timing, fields return `None`.
+
+##### 5. `FilePatternExtractor` — What files were touched and how
+
+Uses `SessionStats.files_modified`, tool call inputs (for `Edit`/`Write`/`Read` tools), and file extension mapping.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `files_modified` | `list[str]` | All files written/edited (from stats + tool calls) |
+| `files_read` | `list[str]` | Files read but not modified (exploration signals) |
+| `files_read_only` | `list[str]` | `files_read - files_modified` |
+| `file_count_modified` | `int` | Count of modified files |
+| `file_count_read` | `int` | Count of read files |
+| `languages_touched` | `dict[str, int]` | Language distribution by file count (`{python: 8, yaml: 2}`) |
+| `primary_language` | `str\|None` | Most frequent language |
+| `files_pattern` | `str` | `"python_backend"` / `"react_frontend"` / `"config"` / `"docs"` / `"testing"` / `"mixed"` |
+| `test_files_touched` | `bool` | Whether any test files were modified |
+| `config_files_touched` | `bool` | Whether any config files were modified |
+| `scope` | `str` | `"single_file"` / `"single_dir"` / `"multi_dir"` / `"cross_project"` |
+
+##### 6. `TokenUsageExtractor` — Token consumption patterns
+
+Uses `Message.usage` (per-message `TokenUsage`) and `UnifiedSession.models`.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `total_input_tokens` | `int` | Sum of all input tokens |
+| `total_output_tokens` | `int` | Sum of all output tokens |
+| `total_tokens` | `int` | Input + output |
+| `cached_tokens` | `int` | Sum of cached tokens (context window efficiency) |
+| `cache_hit_ratio` | `float` | `cached / input` — high = good context reuse |
+| `tokens_per_turn` | `float` | Average tokens per turn |
+| `models_used` | `list[str]` | Model IDs used in session |
+| `primary_model` | `str\|None` | Most-used model by message count |
+| `cost_estimate_usd` | `float\|None` | Estimated cost (if pricing data available) |
+
+**Adapter availability**: Claude (full), OpenCode (full), Codex (partial — last message only), Cursor (no per-message), Gemini (full), Ampcode (full). Fields default to 0 when not available.
+
+##### 7. `ConversationFlowExtractor` — How the conversation went
+
+Analyzes the sequence of roles and message characteristics across the session.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `user_messages_count` | `int` | Total user messages |
+| `assistant_messages_count` | `int` | Total assistant messages |
+| `avg_user_message_length` | `float` | Average user message length in chars (short = precise commands, long = context dumps) |
+| `avg_assistant_message_length` | `float` | Average assistant message length |
+| `max_user_message_length` | `int` | Longest user message |
+| `user_message_lengths` | `list[int]` | Distribution of user message lengths (for pattern detection) |
+| `turn_count` | `int` | Number of turns |
+| `back_and_forth_count` | `int` | Short user messages (<50 chars) after assistant — corrections/follow-ups |
+| `conversation_pattern` | `str` | `"single_shot"` (1-2 turns) / `"iterative"` (many short exchanges) / `"detailed_briefing"` (long first msg, few follow-ups) / `"evolving"` (messages get longer over time) |
+| `first_user_message_length` | `int` | Length of the opening request (indicates how much context was provided upfront) |
+
+##### 8. `OutcomeSignalsExtractor` — Did it work?
+
+Smarter outcome detection than v1. Looks at multiple signals from the end of the session.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `outcome` | `str` | `"fully_achieved"` / `"partially_achieved"` / `"abandoned"` / `"unclear"` |
+| `completion_confidence` | `float` | 0.0–1.0 |
+| `outcome_signals` | `list[str]` | What signals contributed to the assessment |
+| `last_message_role` | `str` | Who spoke last |
+| `session_ended_cleanly` | `bool` | Last message was assistant with no pending errors |
+| `had_late_errors` | `bool` | Errors in the final 20% of the session |
+| `user_expressed_satisfaction` | `bool\|None` | Detected "thanks", "perfect", "great" etc. in last user messages |
+| `user_expressed_frustration` | `bool\|None` | Detected "wrong", "no", "stop", "ugh" etc. in last user messages |
+
+**Outcome logic (v2)**:
+1. If session has 0-1 turns → `abandoned` (confidence 0.7)
+2. If last user message contains satisfaction language → `fully_achieved` (confidence 0.8)
+3. If last user message contains frustration language → `partially_achieved` (confidence 0.7)
+4. If last message is assistant, no late errors, error_rate < 0.2 → `fully_achieved` (confidence 0.6 + turn bonus)
+5. If error_rate > 0.4 or intervention_rate > 0.3 → `partially_achieved` (confidence 0.5)
+6. Otherwise → `unclear` (confidence 0.3)
+
+##### 9. `GoalClassificationExtractor` — What was the user trying to do
+
+Enhanced goal extraction from v1. Looks beyond just the first message.
+
+| Output Key | Type | Description |
+|---|---|---|
+| `underlying_goal` | `str` | First user message text (truncated to 200 chars) |
+| `goal_categories` | `dict[str, int]` | Keyword-matched categories from all user messages |
+| `task_type` | `str` | Primary task classification |
+| `session_type` | `str` | `"quick_question"` / `"single_task"` / `"multi_task"` / `"iterative_refinement"` |
+| `goal_evolution` | `bool` | Whether the goal changed mid-session (detected by new categories appearing in later messages) |
+| `multi_goal` | `bool` | Whether multiple distinct goal categories were detected |
+
+##### 10. `ComplexityExtractor` — How complex was the work
+
+| Output Key | Type | Description |
+|---|---|---|
+| `complexity_score` | `int` | 1-5 composite score |
+| `complexity_factors` | `dict[str, int]` | What contributed (`{turns: 2, tools: 1, files: 1, errors: 1}`) |
+| `brief_summary` | `str` | Auto-generated summary: title/goal + stats |
+
+**Complexity scoring v2**:
+- Base 1
+- `+1` if turn_count > 5
+- `+1` if turn_count > 15
+- `+1` if tool_calls_total > 20 OR unique_tools_used > 5
+- `+1` if file_count_modified > 5 OR scope == "multi_dir"
+- `+1` if error_rate > 0.3 OR intervention_count > 3
+- Cap at 5
+
+#### Updated Facet Schema (v2)
+
+The `session_facets` table gets a new `facet_json` column that stores the complete extractor output as JSON. The existing typed columns remain for indexed queries.
+
+```sql
+-- Migration v4 → v5
+ALTER TABLE session_facets ADD COLUMN facet_json TEXT;
+-- facet_json contains the full extractor output (all ~40 attributes)
+-- Existing columns (outcome, task_type, friction_score, etc.) remain
+-- for indexed SQL queries. facet_json is the source of truth for
+-- aggregation and reporting.
+```
+
+This means:
+- **Existing columns** = fast SQL queries (`WHERE outcome = 'fully_achieved'`)
+- **facet_json** = full richness for aggregation and HTML reports
+- Adding a new extractor only requires re-running analysis — no schema migration
+
+#### LLM Layer: Map-Reduce on Facet JSONs
+
+The LLM layer operates on the *already-extracted* facet JSONs, not raw transcripts. This makes LLM calls much cheaper (facets are ~1KB each vs ~8KB condensed transcripts) and the prompts more focused.
+
+```
+Phase 1: MAP (parallel)
+────────────────────────
+  facets[0:10]   → LLM → batch_summary_1
+  facets[10:20]  → LLM → batch_summary_2
+  facets[20:30]  → LLM → batch_summary_3
+  ...
+  (asyncio.gather or subprocess pool — max 5 concurrent)
+
+Phase 2: REDUCE (single call)
+──────────────────────────────
+  [batch_summary_1, batch_summary_2, ...] → LLM → final_narrative
+
+Output of REDUCE:
+  {
+    "executive_summary": "...",       # 2-3 sentence overview
+    "tool_narratives": {              # Per-tool natural language analysis
+      "claude": "You use Claude primarily for...",
+      "cursor": "Cursor sessions tend to be..."
+    },
+    "pattern_insights": [...],        # Patterns the heuristic can't detect
+    "agents_md_suggestions": [...],   # LLM-quality suggestions with actual content
+    "workflow_recommendations": [...] # "Based on your error patterns, try..."
+  }
+```
+
+**MAP prompt** (per batch of 10-20 facets):
+```
+You are analyzing AI coding session data. Below are {n} session facets
+extracted from {tools} sessions over the past {period}.
+
+Each facet contains: tool_calls_total, error_rate, errors_by_tool,
+intervention_count, outcome, task_type, primary_language, complexity_score,
+conversation_pattern, and more.
+
+Summarize patterns in this batch:
+1. What tools are being used for what? Success rates?
+2. Where are errors concentrating? Which tools/operations?
+3. Are there user intervention patterns? What triggers corrections?
+4. What's working well vs. causing friction?
+
+Respond with JSON: {batch_summary_schema}
+
+Session facets:
+{facets_json}
+```
+
+**REDUCE prompt** (on all batch summaries):
+```
+You are generating a final insights report from {n} batch summaries
+covering {total} sessions across {tools} tools over {period}.
+
+Synthesize into a cohesive narrative:
+1. Executive summary (2-3 sentences)
+2. Per-tool analysis (what each tool is good/bad at)
+3. Cross-tool patterns (things that happen regardless of tool)
+4. Actionable AGENTS.md suggestions (specific, with evidence)
+5. Workflow recommendations (what to change)
+
+Be direct and specific. Reference actual numbers.
+
+Respond with JSON: {final_report_schema}
+
+Batch summaries:
+{summaries_json}
+```
+
+#### Heuristic Aggregator v2
+
+The aggregator works on the full facet JSONs (not the limited set of columns). Fixed bugs from v1:
+
+1. **`affected_tools` bug fixed**: v1 used a dict comprehension that overwrote per-source (last write wins). v2 uses `defaultdict(list)`.
+2. **No hardcoded suggestions**: All suggestions derived from actual data patterns.
+3. **Richer tool comparison**: Uses `read_write_ratio`, `error_rate`, `intervention_rate`, `avg_user_message_length`, not just success/friction.
+4. **Trend computation**: Weekly windows instead of half-split. Detects tool adoption changes.
+
+#### HTML Report Generator
+
+Standalone HTML file with inline CSS. No external dependencies.
+
+**Structure**:
+```
+┌────────────────────────────────────────────────────────┐
+│  sagg insights · 256 sessions · Jan 25–Feb 25, 2026   │
+│  Tools: Claude (83) · Cursor (89) · OpenCode (84)     │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│  ┌─ At a Glance ───────────────────────────────────┐  │
+│  │ Working: ...                                     │  │
+│  │ Hindering: ...                                   │  │
+│  │ Quick win: ...                                   │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Tool Comparison ───────────────────────────────┐  │
+│  │ Table with bar charts (CSS-rendered)             │  │
+│  │ Success rate bars, friction bars                  │  │
+│  │ "Best for" recommendations                       │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Error Hotspots ────────────────────────────────┐  │
+│  │ Top errored tools with counts                    │  │
+│  │ Error clustering patterns                        │  │
+│  │ Recovery rate by tool                            │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ User Intervention Patterns ────────────────────┐  │
+│  │ When you had to correct the agent                │  │
+│  │ Most common triggers                             │  │
+│  │ Post-error vs. proactive redirections            │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Friction Analysis ─────────────────────────────┐  │
+│  │ Top friction categories                          │  │
+│  │ Per-tool friction breakdown                      │  │
+│  │ Trend over time                                  │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Conversation Patterns ─────────────────────────┐  │
+│  │ How you talk to each tool                        │  │
+│  │ Message length distributions                     │  │
+│  │ Conversation flow types                          │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Suggestions ───────────────────────────────────┐  │
+│  │ AGENTS.md / CLAUDE.md / .cursorrules additions   │  │
+│  │ Each with copy button and evidence               │  │
+│  │ Tool recommendations per task type               │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Trends ────────────────────────────────────────┐  │
+│  │ Activity over time (CSS bar chart)               │  │
+│  │ Friction trend / Productivity trend              │  │
+│  │ Tool adoption over time                          │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ LLM Narrative (if available) ──────────────────┐  │
+│  │ Executive summary from map-reduce                │  │
+│  │ Per-tool narratives                              │  │
+│  │ Pattern insights                                 │  │
+│  │ Workflow recommendations                         │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  ┌─ Fun Ending ────────────────────────────────────┐  │
+│  │ Most dramatic / impressive session               │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│  Generated by sagg v1.3 · https://github.com/...      │
+└────────────────────────────────────────────────────────┘
+```
+
+**HTML design constraints**:
+- Single file, all CSS inline in `<style>` block
+- No JavaScript required for core functionality (progressive enhancement OK for copy buttons)
+- Inter/system font stack
+- Card-based layout with subtle borders
+- Bar charts rendered as CSS `<div>` with percentage widths
+- Dark mode via `prefers-color-scheme` media query
+- Mobile-responsive (single column on narrow screens)
+- Copy buttons on suggestions use `navigator.clipboard.writeText()`
+
+#### Updated CLI Interface
+
+```bash
+# Analyze with v2 heuristic pipeline (default)
+sagg analyze-sessions --since 30d
+# Produces facets with ~40 attributes per session
+
+# Force re-analysis (e.g., after adding new extractor)
+sagg analyze-sessions --force --since 30d
+
+# Analyze + run LLM map-reduce on top
+sagg analyze-sessions --since 30d --analyzer llm
+# Phase 1: Heuristic extraction (all sessions)
+# Phase 2: LLM map-reduce on facet JSONs (batches of 10-20)
+
+# Generate HTML report (heuristic data only — no LLM needed)
+sagg insights --format html --output report.html --open
+
+# Generate HTML with LLM narratives merged in
+sagg insights --format html --with-llm --output report.html --open
+
+# CLI summary (quick terminal view)
+sagg insights --format cli
+
+# JSON for scripting
+sagg insights --format json -o data.json
+```
+
+#### Implementation Phases
+
+**Phase A**: Feature extractor pipeline + 10 extractors → replaces `heuristic.py`
+**Phase B**: Aggregator v2 → replaces `aggregator.py` (fixes bugs, uses full facet_json)
+**Phase C**: HTML report generator → replaces "coming soon" stub
+**Phase D**: LLM map-reduce layer → replaces current per-session LLM approach
+
+#### Success Criteria (v2)
+
+| Criteria | Metric |
+|---|---|
+| Heuristic facet has >=30 attributes per session | Count distinct keys in facet_json |
+| Adding a new extractor requires no schema migration | Only code change + `--force` re-run |
+| HTML report renders without external dependencies | Single file, no CDN links |
+| LLM cost reduced vs v1 | Facet-based batching uses ~60% fewer tokens than transcript batching |
+| Heuristic-only report is actionable | Contains error hotspots, intervention patterns, tool comparison — without LLM |
+
+---
+
 ## 14. Technical Dependencies
 
 ### Current (v1.0)
@@ -2711,3 +3234,739 @@ src/sagg/
 - `sagg redact` catches all API keys and file-path PII in test fixtures
 - `sagg publish --no-push` dry-run completes before any network call
 - Full pipeline (collect → export → judge → publish) runs end-to-end in < 5 minutes for 1000 sessions
+
+---
+
+## 20. `sagg learn` - Knowledge Base That Grows Over Time
+
+**Added:** 2026-02-25
+**Priority:** v1.4
+**Inspired by:** [Hermes Agent](https://github.com/NousResearch/hermes-agent) persistent memory and skills system
+
+### 20.1 Problem
+
+sagg collects and analyzes sessions, but the insights are ephemeral -- you run `sagg insights` or `sagg friction-points`, read the output, and the knowledge disappears from context. Meanwhile, your session history contains a wealth of accumulated knowledge:
+
+- **Patterns**: "Claude handles Python refactoring better than Cursor", "always run tests before committing in project X"
+- **Solutions**: Multi-step workflows that solved hard problems (Docker CI setup, auth debugging, migration scripts)
+- **Preferences**: Which tools, models, and approaches work best for your specific projects
+
+Hermes Agent solves this for a single agent with `MEMORY.md` (bounded curated notes) and a skills system (procedural knowledge documents). But Hermes only sees its own sessions. sagg sees *all* sessions across *all* tools -- it can build a richer, cross-tool knowledge base automatically.
+
+### 20.2 Design Overview
+
+Two knowledge stores, both auto-populated from session history:
+
+```
+sagg learn
+    ├── Learned Patterns (memory)     -- bounded, curated, declarative facts
+    │   "Claude is 34% faster for Python debugging"
+    │   "Project X uses ruff + pytest, Python 3.12"
+    │   "User prefers small commits, avoids subagents"
+    │
+    └── Skill Library (skills)        -- procedural, searchable, shareable
+        "How to set up Docker CI for Python projects"
+        "JWT auth debugging workflow (read → test → fix → verify)"
+        "Data pipeline: polars ingestion → validation → export"
+```
+
+The `sagg learn` command processes new sessions since the last run, extracts patterns and skills, and updates the knowledge base. Running `sagg learn --refresh` re-processes recent sessions to update stale knowledge.
+
+### 20.3 Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                         sagg learn                                 │
+│                                                                    │
+│  ┌────────────────────┐   ┌─────────────────────────────────────┐ │
+│  │  Learner (orchestr.)│   │           Data Sources               │ │
+│  │                     │   │                                      │ │
+│  │  1. Get new sessions│◄──┤  SessionStore (existing sessions)   │ │
+│  │  2. Extract patterns│   │  SessionFacets (existing analysis)  │ │
+│  │  3. Extract skills  │   │  FrictionPoints (existing friction) │ │
+│  │  4. Update stores   │   │  ToolComparison (from insights)     │ │
+│  │  5. Save state      │   │                                      │ │
+│  └─────┬──────┬────────┘   └─────────────────────────────────────┘ │
+│        │      │                                                    │
+│   ┌────▼────┐ ┌▼──────────┐                                       │
+│   │ Pattern │ │   Skill   │                                       │
+│   │ Memory  │ │ Extractor │                                       │
+│   │         │ │           │                                       │
+│   │ ~/.sagg/│ │ ~/.sagg/  │                                       │
+│   │ knowledge/ knowledge/ │                                       │
+│   │ memory.md  skills/    │                                       │
+│   └─────────┘ └───────────┘                                       │
+│                                                                    │
+│  Storage: ~/.sagg/knowledge/                                       │
+│  ├── memory.md              # Learned patterns (bounded, curated) │
+│  ├── projects/              # Per-project knowledge profiles      │
+│  │   ├── my-app.md                                                │
+│  │   └── backend-api.md                                           │
+│  ├── skills/                # Extracted skill documents            │
+│  │   ├── docker-ci-python.md                                      │
+│  │   ├── jwt-auth-debug.md                                        │
+│  │   └── polars-pipeline.md                                       │
+│  └── state.json             # Learn state (cursor, counts)        │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+### 20.4 Data Models
+
+#### LearnState -- Tracks incremental learning progress
+
+```python
+class LearnState(BaseModel):
+    """Persistent state for incremental learning."""
+
+    last_learned_at: datetime | None = None      # Timestamp of last learn run
+    sessions_processed: int = 0                   # Total sessions ever processed
+    sessions_since_last: int = 0                  # Sessions processed in last run
+    memory_version: int = 0                       # Bumped on every memory mutation
+    skill_count: int = 0                          # Total skills extracted
+    project_count: int = 0                        # Total project profiles
+```
+
+Stored at `~/.sagg/knowledge/state.json`.
+
+#### MemoryEntry -- A single learned pattern
+
+```python
+class MemoryEntry(BaseModel):
+    """A single declarative fact in the pattern memory."""
+
+    content: str                                  # The learned pattern text
+    category: str                                 # tool_preference | project_convention |
+                                                  # workflow_pattern | model_insight |
+                                                  # environment_fact
+    confidence: float = 0.5                       # 0.0-1.0, increases with evidence
+    evidence_count: int = 1                       # Number of sessions supporting this
+    source_sessions: list[str] = []               # Session IDs (max 5 stored)
+    first_seen: datetime                          # When first extracted
+    last_confirmed: datetime                      # Last time evidence was found
+    superseded_by: str | None = None              # If replaced by a newer pattern
+```
+
+#### SkillDocument -- An extracted procedural skill
+
+```python
+class SkillDocument(BaseModel):
+    """A procedural skill extracted from successful session workflows."""
+
+    id: str                                       # Slugified name
+    name: str                                     # Human-readable title
+    description: str                              # 1-2 sentence summary
+    category: str                                 # debug | setup | migration | testing |
+                                                  # deployment | data_pipeline | refactor
+    trigger: str                                  # When to use this skill
+    procedure: list[str]                          # Step-by-step instructions
+    pitfalls: list[str]                           # Known failure modes
+    tools_used: list[str]                         # AI tools that were involved
+    best_tool: str | None                         # Recommended tool for this workflow
+    source_sessions: list[str]                    # Session IDs this was extracted from
+    confidence: float                             # 0.0-1.0 based on evidence
+    files_pattern: str | None                     # "python_backend" | "react_frontend" etc.
+    primary_language: str | None                  # Dominant language
+    created_at: datetime
+    updated_at: datetime
+    version: int = 1                              # Bumped on each update
+
+    def to_markdown(self) -> str:
+        """Render as SKILL.md format (agentskills.io compatible)."""
+        ...
+```
+
+#### ProjectProfile -- Per-project accumulated knowledge
+
+```python
+class ProjectProfile(BaseModel):
+    """Accumulated knowledge about a specific project."""
+
+    project_name: str
+    project_path: str | None
+    languages: list[str]                          # Detected languages, ordered by frequency
+    frameworks: list[str]                         # Detected frameworks (pytest, react, etc.)
+    conventions: list[str]                        # "uses ruff", "prefers small commits"
+    preferred_tools: dict[str, str]               # {"debugging": "claude", "ui": "cursor"}
+    session_count: int                            # Total sessions for this project
+    last_session_at: datetime
+    git_remote: str | None
+    created_at: datetime
+    updated_at: datetime
+```
+
+### 20.5 Pattern Memory (`~/.sagg/knowledge/memory.md`)
+
+Inspired by Hermes Agent's `MEMORY.md` but auto-populated rather than agent-managed.
+
+**Key design differences from Hermes:**
+
+| Aspect | Hermes MEMORY.md | sagg memory.md |
+|--------|-----------------|----------------|
+| Population | Agent writes manually via tool calls | Auto-extracted from session analysis |
+| Scope | Single agent's observations | Cross-tool patterns from all sessions |
+| Budget | ~2200 chars (~800 tokens) | ~5000 chars (~1800 tokens) -- more to learn from |
+| Update trigger | Mid-session via memory tool | `sagg learn` command (batch) |
+| Format | `§`-delimited entries | Categorized markdown sections |
+
+**Memory structure:**
+
+```markdown
+# Learned Patterns
+<!-- Auto-generated by sagg learn. Last updated: 2026-02-25 -->
+<!-- 72% capacity (3,600 / 5,000 chars) | 45 patterns | v12 -->
+
+## Tool Preferences
+- Claude is 34% faster for Python debugging (92% success vs 79% OpenCode) [14 sessions]
+- Cursor produces shorter sessions for React/UI work (avg 8.7 turns vs 12.3 Claude) [9 sessions]
+- OpenCode best for quick file edits (fastest start-to-finish) [22 sessions]
+
+## Project Conventions
+- session-aggregator: Python 3.12, ruff linting, pytest, hatchling build [48 sessions]
+- frontend-app: React 19, TypeScript, Tailwind v4, Vite [12 sessions]
+
+## Workflow Patterns
+- Always run tests after refactoring in session-aggregator [seen 8 times]
+- Data pipeline work typically needs polars, not pandas [seen 6 times]
+- Auth debugging follows: read logs → check middleware → fix handler → test [seen 4 times]
+
+## Model Insights
+- claude-sonnet-4 handles multi-file refactoring well (low friction) [11 sessions]
+- gemini-2.5-pro good for exploration/research tasks [7 sessions]
+
+## Environment
+- Primary OS: Linux (Ubuntu)
+- Python managed via uv
+- Git workflow: feature branches, small commits
+```
+
+**Bounded memory management:**
+
+When memory exceeds 80% capacity (~4000 chars), the learner consolidates:
+1. Merge entries with overlapping content (e.g., two entries about Claude + Python → one)
+2. Drop entries with `confidence < 0.3` and `evidence_count == 1`
+3. Summarize verbose entries (keep the insight, drop the detail)
+4. Prefer entries with higher `evidence_count` and more recent `last_confirmed`
+
+### 20.6 Skill Extraction
+
+Skills are extracted when sessions exhibit successful multi-step problem solving. The extractor looks for:
+
+**Extraction criteria (must meet at least 2):**
+- Session has ≥ 5 tool calls (non-trivial workflow)
+- Session outcome is `fully_achieved` or `partially_achieved` (from facets)
+- Friction score < 0.3 (clean execution, not a struggle)
+- Similar pattern appears in ≥ 2 sessions (not a one-off)
+- Session involves ≥ 3 files modified (real work, not a quick edit)
+
+**Two extraction backends:**
+
+**Backend A: Heuristic Skill Extractor (zero cost)**
+
+```python
+class HeuristicSkillExtractor:
+    """Extract skills from sessions using pattern matching."""
+
+    def extract(self, sessions: list[UnifiedSession],
+                facets: list[dict]) -> list[SkillDocument]:
+        # 1. Group sessions by similar tool sequences
+        #    e.g., [Read, Grep, Edit, Bash(pytest)] appears 4 times
+        sequences = self._extract_tool_sequences(sessions)
+
+        # 2. Cluster by file pattern + task type from facets
+        #    "python_backend + debug" sessions that succeeded
+        clusters = self._cluster_by_pattern(sessions, facets)
+
+        # 3. For each cluster with ≥2 sessions:
+        #    - Extract common tool sequence as "procedure"
+        #    - Extract first user message as "trigger"
+        #    - Extract error patterns from failed attempts as "pitfalls"
+        #    - Name from goal_categories in facets
+        skills = []
+        for cluster in clusters:
+            if len(cluster) >= 2:
+                skill = self._synthesize_skill(cluster)
+                skills.append(skill)
+
+        return skills
+```
+
+**Backend B: LLM Skill Extractor (higher quality)**
+
+```python
+class LLMSkillExtractor:
+    """Extract skills using LLM via CLI tools."""
+
+    PROMPT = """Analyze these {count} coding sessions that solved similar problems.
+Extract a reusable skill document.
+
+Sessions:
+{condensed_sessions}
+
+Generate a skill document with:
+- name: short descriptive name (kebab-case)
+- description: 1-2 sentence summary
+- trigger: when should this skill be used
+- procedure: step-by-step instructions (numbered)
+- pitfalls: common mistakes or failure modes
+- best_tool: which AI tool worked best for this
+
+Respond with JSON matching this schema:
+{schema}
+"""
+```
+
+Uses the same CLI LLM backend as `sagg analyze-sessions` (section 13.7) -- no new dependencies.
+
+**Skill file format (`~/.sagg/knowledge/skills/<name>.md`):**
+
+```markdown
+---
+name: docker-ci-python
+description: Set up Docker-based CI for Python projects with pytest
+category: setup
+confidence: 0.85
+evidence_sessions: 4
+best_tool: claude
+primary_language: python
+created_at: 2026-02-20
+updated_at: 2026-02-25
+version: 2
+---
+
+# Docker CI for Python Projects
+
+## When to Use
+Setting up or fixing CI/CD pipelines for Python projects that use Docker,
+especially when tests need to run in containers.
+
+## Procedure
+1. Check existing Dockerfile and docker-compose.yml
+2. Create or update `.github/workflows/ci.yml` with Python matrix
+3. Configure pytest to run inside container with proper volume mounts
+4. Set up caching for pip/uv dependencies (speeds up CI 3-5x)
+5. Add health checks and retry logic for flaky tests
+6. Run locally with `act` to verify before pushing
+
+## Pitfalls
+- Forgetting to copy `pyproject.toml` before `uv sync` (cache bust)
+- Missing `--no-cache-dir` flag causes stale packages in CI
+- SQLite tests fail in Docker if `/tmp` isn't writable
+
+## Verification
+- CI pipeline passes on all matrix entries
+- Cache hit rate > 80% on second run
+- Total CI time < 5 minutes for standard test suite
+```
+
+### 20.7 Learner Orchestrator
+
+The `Learner` class ties everything together:
+
+```python
+class Learner:
+    """Orchestrates knowledge extraction from session history.
+
+    Processes new sessions since the last run, extracts patterns
+    and skills, and updates the knowledge base incrementally.
+    """
+
+    def __init__(self, store: SessionStore, knowledge_dir: Path):
+        self.store = store
+        self.knowledge_dir = knowledge_dir
+        self.memory = PatternMemory(knowledge_dir / "memory.md")
+        self.skill_library = SkillLibrary(knowledge_dir / "skills")
+        self.project_profiles = ProjectProfiles(knowledge_dir / "projects")
+        self.state = LearnState.load(knowledge_dir / "state.json")
+
+    def learn(
+        self,
+        limit: int = 100,
+        refresh: bool = False,
+        analyzer: str = "heuristic",  # or "llm"
+    ) -> LearnResult:
+        """Main learning loop.
+
+        Args:
+            limit: Max sessions to process in this run.
+            refresh: If True, re-process sessions from the last 7 days
+                     even if already processed (updates stale knowledge).
+            analyzer: Which backend to use for extraction.
+
+        Returns:
+            LearnResult with counts of new/updated patterns, skills, profiles.
+        """
+        # 1. Get sessions to process
+        if refresh:
+            since = datetime.now() - timedelta(days=7)
+            sessions = self.store.list_sessions(since=since, limit=limit)
+        else:
+            since = self.state.last_learned_at
+            sessions = self.store.list_sessions(since=since, limit=limit)
+
+        if not sessions:
+            return LearnResult(sessions_processed=0)
+
+        # 2. Load full content + facets for each session
+        enriched = self._enrich_sessions(sessions)
+
+        # 3. Extract and update patterns
+        new_patterns = self._extract_patterns(enriched)
+        self.memory.merge(new_patterns)
+
+        # 4. Extract and update skills
+        new_skills = self._extract_skills(enriched, analyzer)
+        self.skill_library.merge(new_skills)
+
+        # 5. Update project profiles
+        self._update_project_profiles(enriched)
+
+        # 6. Consolidate memory if over budget
+        if self.memory.usage_pct > 0.8:
+            self.memory.consolidate()
+
+        # 7. Save state
+        self.state.last_learned_at = datetime.now()
+        self.state.sessions_processed += len(sessions)
+        self.state.sessions_since_last = len(sessions)
+        self.state.memory_version += 1
+        self.state.skill_count = self.skill_library.count()
+        self.state.project_count = self.project_profiles.count()
+        self.state.save()
+
+        return LearnResult(
+            sessions_processed=len(sessions),
+            new_patterns=len(new_patterns),
+            updated_patterns=self.memory.updated_count,
+            new_skills=len(new_skills),
+            updated_skills=self.skill_library.updated_count,
+            projects_updated=self.project_profiles.updated_count,
+        )
+```
+
+### 20.8 Pattern Extraction Logic
+
+Patterns are extracted from session metadata, facets, and cross-session analysis:
+
+```python
+def _extract_patterns(self, sessions: list[EnrichedSession]) -> list[MemoryEntry]:
+    """Extract declarative patterns from a batch of sessions."""
+    patterns = []
+
+    # 1. Tool preference patterns
+    #    Compare success rates and friction across tools for similar tasks
+    tool_stats = self._aggregate_tool_stats(sessions)
+    for task_type, stats in tool_stats.items():
+        if len(stats) >= 2:  # Need at least 2 tools to compare
+            best = max(stats, key=lambda s: s.success_rate)
+            if best.success_rate > 0.7 and best.sample_size >= 3:
+                patterns.append(MemoryEntry(
+                    content=f"{best.tool} is best for {task_type} "
+                            f"({best.success_rate:.0%} success, "
+                            f"avg {best.avg_turns:.0f} turns)",
+                    category="tool_preference",
+                    confidence=min(best.sample_size / 10, 1.0),
+                    evidence_count=best.sample_size,
+                ))
+
+    # 2. Project convention patterns
+    #    Detect languages, frameworks, tools from file patterns and tool calls
+    for project, proj_sessions in self._group_by_project(sessions):
+        conventions = self._detect_conventions(proj_sessions)
+        if conventions:
+            patterns.append(MemoryEntry(
+                content=f"{project}: {', '.join(conventions)}",
+                category="project_convention",
+                confidence=0.8,
+                evidence_count=len(proj_sessions),
+            ))
+
+    # 3. Workflow patterns
+    #    Repeated tool sequences across sessions
+    sequences = self._find_recurring_sequences(sessions, min_count=3)
+    for seq in sequences:
+        patterns.append(MemoryEntry(
+            content=f"{seq.description} [{seq.tool_chain}]",
+            category="workflow_pattern",
+            confidence=min(seq.count / 5, 1.0),
+            evidence_count=seq.count,
+        ))
+
+    # 4. Model insights
+    #    From facets: which models have low friction for which task types
+    model_perf = self._analyze_model_performance(sessions)
+    for insight in model_perf:
+        patterns.append(MemoryEntry(
+            content=insight.text,
+            category="model_insight",
+            confidence=insight.confidence,
+            evidence_count=insight.sample_size,
+        ))
+
+    return patterns
+```
+
+### 20.9 Database Schema Changes (Migration v4 → v5)
+
+```sql
+-- Learn state tracking
+CREATE TABLE IF NOT EXISTS learn_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),       -- Singleton row
+    last_learned_at INTEGER,
+    sessions_processed INTEGER DEFAULT 0,
+    memory_version INTEGER DEFAULT 0,
+    skill_count INTEGER DEFAULT 0,
+    project_count INTEGER DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
+-- Learned patterns (indexed for search and dedup)
+CREATE TABLE IF NOT EXISTS learned_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL,                       -- tool_preference, project_convention, etc.
+    confidence REAL DEFAULT 0.5,
+    evidence_count INTEGER DEFAULT 1,
+    source_sessions_json TEXT,                    -- JSON array of session IDs (max 5)
+    first_seen INTEGER NOT NULL,
+    last_confirmed INTEGER NOT NULL,
+    superseded_by INTEGER REFERENCES learned_patterns(id),
+    active BOOLEAN DEFAULT 1                      -- soft delete for superseded patterns
+);
+
+-- Extracted skills
+CREATE TABLE IF NOT EXISTS learned_skills (
+    id TEXT PRIMARY KEY,                          -- slugified name
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    category TEXT NOT NULL,
+    content_md TEXT NOT NULL,                     -- Full SKILL.md content
+    confidence REAL DEFAULT 0.5,
+    evidence_count INTEGER DEFAULT 1,
+    source_sessions_json TEXT,
+    best_tool TEXT,
+    primary_language TEXT,
+    files_pattern TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    version INTEGER DEFAULT 1
+);
+
+-- Project profiles
+CREATE TABLE IF NOT EXISTS project_profiles (
+    project_name TEXT PRIMARY KEY,
+    project_path TEXT,
+    languages_json TEXT,                          -- JSON array
+    frameworks_json TEXT,                         -- JSON array
+    conventions_json TEXT,                        -- JSON array
+    preferred_tools_json TEXT,                    -- JSON dict
+    session_count INTEGER DEFAULT 0,
+    last_session_at INTEGER,
+    git_remote TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- FTS for skills search
+CREATE VIRTUAL TABLE IF NOT EXISTS learned_skills_fts USING fts5(
+    name,
+    description,
+    content_md,
+    content=learned_skills,
+    content_rowid=rowid
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_patterns_category ON learned_patterns(category);
+CREATE INDEX IF NOT EXISTS idx_patterns_confidence ON learned_patterns(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_patterns_active ON learned_patterns(active);
+CREATE INDEX IF NOT EXISTS idx_skills_category ON learned_skills(category);
+CREATE INDEX IF NOT EXISTS idx_skills_language ON learned_skills(primary_language);
+CREATE INDEX IF NOT EXISTS idx_profiles_sessions ON project_profiles(session_count DESC);
+```
+
+### 20.10 CLI Interface
+
+```bash
+# Main learning command
+sagg learn [OPTIONS]
+
+Options:
+  --refresh                  Re-process last 7 days of sessions (update stale knowledge)
+  --since DURATION           Only learn from sessions in this time range (e.g., 30d)
+  --limit INTEGER            Max sessions to process per run (default: 100)
+  --analyzer [heuristic|llm] Extraction backend (default: heuristic)
+  --llm-cli [claude|codex|gemini]  Which CLI tool for LLM extraction
+  --dry-run                  Show what would be learned without saving
+  -v, --verbose              Show each extracted pattern and skill
+
+# View accumulated knowledge
+sagg knowledge [OPTIONS]
+
+Subcommands:
+  sagg knowledge show             # Show full knowledge base (memory + skills + profiles)
+  sagg knowledge memory           # Show just the pattern memory
+  sagg knowledge skills           # List all extracted skills
+  sagg knowledge skills <name>    # Show a specific skill in detail
+  sagg knowledge projects         # List project profiles
+  sagg knowledge search <query>   # Search across all knowledge (FTS)
+  sagg knowledge export           # Export knowledge base as JSON
+  sagg knowledge reset            # Clear all learned knowledge (with confirmation)
+
+Options:
+  --format [rich|json|markdown]   Output format (default: rich)
+  --project TEXT                   Filter by project
+  --category TEXT                  Filter patterns/skills by category
+```
+
+### 20.11 Example Workflows
+
+```bash
+# First time: learn from all collected sessions
+$ sagg learn --since 90d
+Processing 342 sessions...
+  Analyzing patterns...     ████████████████████████████████ 342/342
+  Extracting skills...      ████████████████████████████████ 12 clusters found
+
+Learn complete:
+  Sessions processed: 342
+  New patterns:       28
+  New skills:         7
+  Project profiles:   5
+
+# View what was learned
+$ sagg knowledge show
+
+╭─ Learned Patterns (28 entries, 62% capacity) ─────────────────────╮
+│                                                                    │
+│ Tool Preferences (6)                                               │
+│  • Claude 34% faster for Python debugging (92% success) [14 ses]  │
+│  • Cursor best for React/UI (8.7 avg turns) [9 ses]               │
+│  • OpenCode fastest for quick edits [22 ses]                       │
+│                                                                    │
+│ Project Conventions (5)                                            │
+│  • session-aggregator: Python 3.12, ruff, pytest, hatch [48 ses]  │
+│  • frontend-app: React 19, TS, Tailwind v4, Vite [12 ses]        │
+│                                                                    │
+│ ...                                                                │
+╰────────────────────────────────────────────────────────────────────╯
+
+╭─ Skills Library (7 skills) ───────────────────────────────────────╮
+│  docker-ci-python      Setup Docker CI for Python     85%  claude │
+│  jwt-auth-debug        JWT authentication debugging   78%  claude │
+│  polars-pipeline       Data pipeline with polars      72%  any    │
+│  react-component-test  Testing React components       68%  cursor │
+│  ...                                                               │
+╰────────────────────────────────────────────────────────────────────╯
+
+# Refresh after a week of new sessions
+$ sagg learn --refresh
+Processing 23 new sessions since last run...
+  Updated patterns:   4 (2 new, 2 strengthened)
+  Updated skills:     1 (jwt-auth-debug v2 → v3)
+  Projects updated:   2
+
+# Search knowledge
+$ sagg knowledge search "docker"
+Skills:
+  docker-ci-python (85%) - Set up Docker-based CI for Python projects
+Patterns:
+  "Docker builds need --no-cache-dir for pip in CI" [4 sessions]
+
+# Show a specific skill
+$ sagg knowledge skills docker-ci-python
+[renders full SKILL.md content with metadata]
+
+# Use LLM for higher quality extraction
+$ sagg learn --analyzer llm --since 7d
+Detected: claude -p (Claude Code CLI)
+Processing 15 sessions via claude -p...
+  Estimated cost: ~$0.18
+  New patterns: 5 (higher confidence than heuristic)
+  New skills: 2
+```
+
+### 20.12 Integration with Existing Analytics
+
+| Existing Module | How `learn` Uses It |
+|---|---|
+| `analytics/friction.py` | Friction scores determine which sessions are "successful" (low friction = skill candidate) |
+| `analytics/similar.py` | TF-IDF similarity clusters sessions for skill extraction (similar sessions → one skill) |
+| `analytics/oracle.py` | Knowledge base feeds into oracle search -- "Have I learned about this before?" |
+| `analytics/heatmap.py` | Activity data helps weight patterns by recency |
+| `storage/store.py` | Session queries, facet reads; new methods for learn state and knowledge CRUD |
+| `cli.py` insights | `sagg insights` can reference learned patterns in its suggestions |
+| `export/` | `sagg knowledge export` produces JSON or Markdown for sharing |
+
+### 20.13 Integration with AI Tool Configs
+
+The knowledge base can optionally feed back into your AI tools:
+
+```bash
+# Generate AGENTS.md additions from learned patterns
+$ sagg knowledge suggest-rules
+Based on 342 sessions, consider adding to your AGENTS.md:
+
+  ## Python Projects
+  - Use polars instead of pandas for data processing
+  - Always run `uv run pytest` before committing
+  - Prefer ruff over flake8/black
+
+  ## Debugging
+  - Check logs first, then middleware, then handlers
+  - JWT issues: verify token expiry, not just signature
+
+# Auto-append to AGENTS.md (with confirmation)
+$ sagg knowledge suggest-rules --apply
+```
+
+This bridges sagg's passive observation role with active developer assistance -- the knowledge base becomes a feedback loop from past sessions into future ones.
+
+### 20.14 File Structure
+
+```
+src/sagg/
+    knowledge/
+        __init__.py
+        memory.py            # PatternMemory: bounded pattern store with merge/consolidate
+        skills.py            # SkillLibrary: skill extraction, storage, search
+        projects.py          # ProjectProfiles: per-project knowledge accumulation
+        learner.py           # Learner orchestrator: ties everything together
+        extractors.py        # HeuristicExtractor + LLMExtractor backends
+    storage/
+        db.py                # EXTEND: migration v4 → v5 (learn tables)
+        store.py             # EXTEND: learn state, patterns, skills, profiles CRUD
+    cli.py                   # EXTEND: sagg learn + sagg knowledge commands
+```
+
+### 20.15 Dependencies
+
+```toml
+# No new required dependencies.
+# Heuristic extractor: uses existing sagg analytics code only.
+# LLM extractor: shells out to CLI tools already on user's PATH.
+# Pattern memory: plain markdown files, no special libraries.
+# Skills: markdown files with YAML frontmatter (parsed with existing pydantic).
+```
+
+### 20.16 Success Criteria
+
+| Criteria | Metric |
+|---|---|
+| Pattern extraction covers all sessions | 100% of processed sessions contribute to at least one pattern |
+| Skill extraction finds real workflows | Manual review: ≥ 80% of extracted skills are useful/accurate |
+| Memory stays bounded | Never exceeds 5000 char limit, consolidation works automatically |
+| Incremental learning is fast | `sagg learn` processes 100 sessions in < 30s (heuristic) |
+| Refresh updates stale knowledge | Running `--refresh` after 7 days updates confidence scores |
+| Knowledge is searchable | FTS search across patterns + skills returns relevant results |
+| No new pip dependencies | Everything uses existing sagg code + optional CLI tools |
+| Cross-tool patterns detected | Patterns comparing Claude vs Cursor vs OpenCode appear automatically |
+| Skills are agentskills.io compatible | Exported skills parse as valid agentskills.io SKILL.md format |
+
+### 20.17 Relationship to Other Features
+
+- **`sagg insights` (§13.7)**: Insights generates *reports*. Learn generates *persistent knowledge*. Insights is consumed once; learn accumulates over time. They share the same facet data.
+- **`sagg analyze-sessions` (§13.7)**: Analyze creates per-session facets. Learn consumes those facets to extract cross-session patterns. Run analyze first, then learn.
+- **`sagg skill-suggestions` (§13.3)**: Skill suggestions was a planned feature that Learn now **subsumes**. Learn does the same thing (extract skills from patterns) but also maintains a persistent library and handles incremental updates. §13.3 should be considered deprecated in favor of §20.
+- **`sagg oracle` (existing)**: Oracle searches session content. Knowledge search is complementary -- it searches the distilled knowledge rather than raw transcripts. Future: oracle could check knowledge base first before searching raw sessions.
+- **`sagg friction-points` (existing)**: Friction analysis identifies problem sessions. Learn uses friction scores to determine which sessions are *good* candidates for skill extraction (low friction = successful workflow).
+- **Fine-tuning pipeline (§19)**: The knowledge base could tag which sessions make good training data -- high-confidence skills often come from high-quality sessions.
