@@ -2455,7 +2455,55 @@ Most session trackers just store data. These features actually help you code bet
 
 ---
 
-## 17. References
+## 17. Trajectory Visualization: Hodoscope Integration
+
+**Added:** 2026-02-22
+
+### What is Hodoscope
+
+[Hodoscope](https://github.com/AR-FORUM/hodoscope) is an unsupervised agent trajectory analysis tool. It takes raw session logs, summarizes each agent action via LLM, embeds them into a shared vector space, and renders interactive t-SNE/UMAP scatter plots. Density diffing (KDE overlay) shows exactly where two agent configurations diverge behaviorally.
+
+### How It Fits Into sagg
+
+```
+sagg collect → session JSONL → hodoscope analyze → embed → t-SNE viz
+                                                  → KDE density diff
+```
+
+- Feed collected session JSONL files directly into `hodoscope analyze`
+- Use `--group-by` on sagg metadata fields (e.g., `source`, `pain_score`, `model`, `project`) to compare behavioral clusters across tools or sessions
+- Density overlay pinpoints where high-pain sessions diverge from low-pain ones — ideal for `sagg friction-points` follow-up
+
+### Integration Paths
+
+**Option 1: Hodoscope CLI (immediate, zero infra)**
+```bash
+pip install hodoscope
+hodoscope analyze ~/.sagg/sessions/claude/*.jsonl
+hodoscope viz *.hodoscope.json --group-by source --open
+```
+Best for: exploration, validating whether behavioral clusters are meaningful before engineering effort.
+
+**Option 2: Native sagg pipeline (production)**
+Replicate Hodoscope's core inside sagg using LiteLLM + UMAP:
+- `sagg viz` subcommand
+- Integrates directly with `sessions.db`
+- Feeds into `sagg analyze` (§13.2) clustering pipeline
+- No external dependency
+
+### Recommendation
+
+Start with Hodoscope CLI to validate patterns visually. If clusters show clear separation (e.g., high-pain vs. low-pain sessions group distinctly), port the summarize→embed→project pipeline natively into `sagg analyze` (§13.2).
+
+### References
+
+- [Hodoscope GitHub](https://github.com/AR-FORUM/hodoscope)
+- [Hodoscope PyPI](https://pypi.org/project/hodoscope/)
+- Zhong et al., *Hodoscope: Unsupervised Behavior Discovery in AI Agents* (2026)
+
+---
+
+## 18. References
 
 - [AgentTrace Specification](https://agent-trace.dev)
 - [Agent Prism Components](https://github.com/evilmartians/agent-prism)
@@ -2463,3 +2511,203 @@ Most session trackers just store data. These features actually help you code bet
 - [claude-code-viewer](https://github.com/esc5221/claude-code-viewer)
 - [OpenLLMetry](https://github.com/traceloop/openllmetry)
 - [Langfuse](https://github.com/langfuse/langfuse)
+
+---
+
+## 19. Fine-Tuning Data Export Pipeline
+
+**Added:** 2026-02-25
+**Priority:** v0.2
+**Motivation:** sagg already parses all session logs into `UnifiedSession` with full turn/message/tool_call structure. The missing piece is a fine-tuning exporter + judge pass that turns these sessions into high-quality training data automatically.
+
+### 19.1 Problem
+
+Coding session logs are valuable fine-tuning data (real human-AI collaboration, not synthetic), but they sit in raw JSONL with no quality filtering, PII scrubbing, or standard training format. Tools like DataClaw (https://github.com/peteromallet/dataclaw) prove the pattern works — but they publish publicly. We need a private, filtered, local-first version integrated into sagg.
+
+### 19.2 Design
+
+Three-stage pipeline:
+
+```
+sagg collect
+    -> sagg export --format finetune   (convert to ShareGPT JSONL)
+    -> sagg judge                      (LLM quality scoring 0/1/2)
+    -> sagg publish                    (push to private HuggingFace repo)
+```
+
+Each stage is independently runnable (composable). Output at each stage is a JSONL file.
+
+### 19.3 Stage 1: Fine-Tune Exporter (`sagg export --format finetune`)
+
+**New file:** `src/sagg/export/finetune.py`
+
+**Output format:** ShareGPT (industry standard, compatible with LLaMA-Factory, Axolotl, Unsloth, TRL):
+
+```jsonl
+{
+  "conversations": [
+    {"from": "human", "value": "<user turn text>"},
+    {"from": "gpt", "value": "<assistant turn text>"}
+  ],
+  "source": "claude",
+  "session_id": "abc123",
+  "project": "/home/user/myproject",
+  "model": "claude-sonnet-4-5",
+  "tool_calls": 3,
+  "input_tokens": 1200,
+  "output_tokens": 400,
+  "quality_score": null
+}
+```
+
+**Filtering rules (pre-judge):**
+- Skip turns with < 2 messages (no real exchange)
+- Skip turns where assistant response is < 50 chars (likely error/refusal)
+- Skip turns where user message is < 10 chars
+- Skip turns with only tool calls and no assistant text
+- Optionally skip turns where `is_error=True` on all tool results
+
+**Multi-turn support:** Configurable. Default: export each turn as a standalone conversation. `--multi-turn` flag: export full session as one conversation with all turns.
+
+**CLI:**
+```bash
+sagg export --format finetune --output finetune.jsonl
+sagg export --format finetune --since 30d --source claude --output finetune.jsonl
+sagg export --format finetune --multi-turn --output finetune_full.jsonl
+```
+
+### 19.4 Stage 2: LLM Judge Pass (`sagg judge`)
+
+**New command:** `sagg judge`
+
+Scores each (prompt, response) pair using an LLM judge. Same 0/1/2 rubric as the Bullshit Benchmark (https://github.com/petergpt/bullshit-benchmark):
+
+```
+0 = Low quality: vague, hallucinated, wrong, or unhelpful response
+1 = Partial quality: correct but incomplete or poorly structured
+2 = High quality: correct, clear, complete, useful
+```
+
+**Judge prompt template:**
+```
+You are evaluating the quality of an AI coding assistant response.
+
+User request:
+{user_message}
+
+Assistant response:
+{assistant_message}
+
+Score this response 0, 1, or 2:
+0 = Low quality (vague, wrong, or unhelpful)
+1 = Partial quality (correct but incomplete)
+2 = High quality (correct, clear, complete)
+
+Respond with ONLY the number.
+```
+
+**Implementation:**
+- Uses LLM via CLI tools (same pattern as `sagg analyze-sessions --analyzer llm`): `claude -p`, `gemini`, or `codex`
+- No SDK dependency
+- Panel of judges (configurable, default: 1 judge)
+- Batched with configurable concurrency (default: 5 concurrent)
+- Writes `quality_score` field back to JSONL
+
+**CLI:**
+```bash
+sagg judge --input finetune.jsonl --output scored.jsonl --model claude
+sagg judge --input finetune.jsonl --output scored.jsonl --model gemini --concurrency 10
+sagg judge --input finetune.jsonl --output scored.jsonl --filter-score 1  # only emit score >= 1
+```
+
+**Cost estimate:** ~100 tokens per judge call. 1000 sessions x 5 turns avg = 5000 calls = ~500K tokens. At Claude Haiku pricing: ~$0.05. Cheap.
+
+### 19.5 Stage 3: Redaction (`sagg redact`)
+
+**New command:** `sagg redact` (or flag on export)
+
+Scrubs PII and secrets before any export or publish step. Hooks into the existing `src/sagg/security/` module.
+
+**Redaction targets:**
+- API keys and tokens (regex patterns: `sk-`, `Bearer `, `ghp_`, etc.)
+- File paths containing username (replace with `~`)
+- Email addresses
+- Configurable custom patterns via `~/.sagg/config.toml` `[redact]` section
+
+**CLI:**
+```bash
+sagg export --format finetune --redact --output finetune.jsonl
+# or standalone
+sagg redact --input finetune.jsonl --output redacted.jsonl
+```
+
+### 19.6 Stage 4: Publish (`sagg publish`)
+
+**New command:** `sagg publish`
+
+Pushes final JSONL to a private HuggingFace dataset repo. Requires `HF_TOKEN` env var.
+
+**Safety gates (mandatory, cannot be skipped):**
+1. `--no-push` dry-run first (shows row count, sample rows, PII scan summary)
+2. Explicit `--confirm` flag required to actually push
+3. Prompts for repo name if not configured
+
+**CLI:**
+```bash
+sagg publish --input scored.jsonl --repo username/my-coding-sessions --no-push
+sagg publish --input scored.jsonl --repo username/my-coding-sessions --confirm
+```
+
+**Full pipeline (one-liner):**
+```bash
+sagg collect --since 30d && \
+sagg export --format finetune --redact --since 30d --output /tmp/raw.jsonl && \
+sagg judge --input /tmp/raw.jsonl --filter-score 1 --output /tmp/scored.jsonl && \
+sagg publish --input /tmp/scored.jsonl --repo jayshah5696/jay-bench-coding --no-push
+```
+
+### 19.7 Data Model Changes
+
+Add `quality_score` and `export_format` to existing `SessionStats` or as a separate `FinetuneRecord` model:
+
+```python
+class FinetuneRecord(BaseModel):
+    session_id: str
+    source: SourceTool
+    project: str | None
+    model: str | None
+    conversations: list[dict]   # ShareGPT format
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+    quality_score: int | None = None  # 0, 1, 2 from judge
+    judge_model: str | None = None
+    exported_at: datetime
+```
+
+### 19.8 File Structure
+
+```
+src/sagg/
+    export/
+        finetune.py          # NEW: ShareGPT exporter + FinetuneRecord model
+    security/
+        redactor.py          # EXTEND: add API key + path patterns
+    cli.py                   # EXTEND: add judge, redact, publish subcommands
+```
+
+### 19.9 Inspiration and References
+
+- **DataClaw** (https://github.com/peteromallet/dataclaw): session log → HuggingFace pipeline with PII redaction. DataClaw is public-first; sagg's pipeline is private-first.
+- **Bullshit Benchmark** (https://github.com/petergpt/bullshit-benchmark): LLM judge panel with 0/1/2 rubric. Same pattern for quality scoring.
+- **Oxen.ai** (https://docs.oxen.ai): versioned dataset platform with batch LLM annotation. sagg's judge pass replicates their "batch inference for labeling" feature locally.
+- **LLaMA-Factory / Axolotl / Unsloth**: target fine-tuning frameworks that consume ShareGPT JSONL natively.
+- **AgentTrace** (https://agent-trace.dev): existing sagg export format. Fine-tune export is a parallel track, not a replacement.
+
+### 19.10 Success Criteria
+
+- `sagg export --format finetune` produces valid ShareGPT JSONL from any collected session
+- `sagg judge` scores and filters sessions without SDK dependencies (CLI-tool-only approach)
+- `sagg redact` catches all API keys and file-path PII in test fixtures
+- `sagg publish --no-push` dry-run completes before any network call
+- Full pipeline (collect → export → judge → publish) runs end-to-end in < 5 minutes for 1000 sessions
