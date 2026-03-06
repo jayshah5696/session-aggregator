@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import click
@@ -63,7 +63,9 @@ def parse_token_amount(s: str) -> int:
     except ValueError:
         pass
 
-    raise ValueError(f"Invalid token amount format: '{s}'. Use format like '500k', '1M', or '100000'")
+    raise ValueError(
+        f"Invalid token amount format: '{s}'. Use format like '500k', '1M', or '100000'"
+    )
 
 
 def parse_duration(s: str) -> timedelta:
@@ -109,9 +111,9 @@ def format_age(dt: datetime) -> str:
     Returns:
         Human-readable age like '2h ago', '3d ago', '1w ago'.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
 
     delta = now - dt
     seconds = delta.total_seconds()
@@ -260,13 +262,12 @@ def print_session_detail(session: UnifiedSession, as_json: bool = False) -> None
                         console.print(part.content)
                     elif isinstance(part, ToolCallPart):
                         console.print(f"[dim]→ Tool Call:[/dim] [cyan]{part.tool_name}[/cyan]")
-                        if part.input:
-                            if isinstance(part.input, str):
-                                console.print(
-                                    f"  [dim]{part.input[:200]}...[/dim]"
-                                    if len(str(part.input)) > 200
-                                    else f"  [dim]{part.input}[/dim]"
-                                )
+                        if part.input and isinstance(part.input, str):
+                            console.print(
+                                f"  [dim]{part.input[:200]}...[/dim]"
+                                if len(str(part.input)) > 200
+                                else f"  [dim]{part.input}[/dim]"
+                            )
                     elif isinstance(part, ToolResultPart):
                         status = "[red]error[/red]" if part.is_error else "[green]success[/green]"
                         console.print(f"[dim]← Tool Result ({status}):[/dim]")
@@ -291,7 +292,7 @@ def collect(source: str | None, since: str | None) -> None:
     if since:
         try:
             delta = parse_duration(since)
-            since_dt = datetime.now(timezone.utc) - delta
+            since_dt = datetime.now(UTC) - delta
         except ValueError as e:
             error_console.print(f"[red]Error:[/red] {e}")
             sys.exit(1)
@@ -420,7 +421,7 @@ def show(session_id: str, as_json: bool) -> None:
                 session = store.get_session(matches[0].id)
             elif len(matches) > 1:
                 error_console.print(
-                    f"[red]Error:[/red] Ambiguous session ID. Multiple matches found:"
+                    "[red]Error:[/red] Ambiguous session ID. Multiple matches found:"
                 )
                 for s in matches[:5]:
                     error_console.print(f"  • {s.id}")
@@ -566,7 +567,7 @@ def export(
                     session = store.get_session(matches[0].id)
                 elif len(matches) > 1:
                     error_console.print(
-                        f"[red]Error:[/red] Ambiguous session ID. Multiple matches found:"
+                        "[red]Error:[/red] Ambiguous session ID. Multiple matches found:"
                     )
                     for s in matches[:5]:
                         error_console.print(f"  - {s.id}")
@@ -638,43 +639,39 @@ def stats(group_by: str | None) -> None:
 
         console.print(Panel(summary, title="Summary", border_style="blue"))
 
-        if group_by == "source" or group_by is None:
+        if (group_by == "source" or group_by is None) and stats_data["sessions_by_source"]:
             # Sessions by source
-            if stats_data["sessions_by_source"]:
-                source_table = Table(show_header=True, header_style="bold")
-                source_table.add_column("Source")
-                source_table.add_column("Sessions", justify="right")
+            source_table = Table(show_header=True, header_style="bold")
+            source_table.add_column("Source")
+            source_table.add_column("Sessions", justify="right")
 
-                for source_name, count in sorted(
-                    stats_data["sessions_by_source"].items(),
-                    key=lambda x: x[1],
-                    reverse=True,
-                ):
-                    source_table.add_row(source_name, str(count))
+            for source_name, count in sorted(
+                stats_data["sessions_by_source"].items(),
+                key=lambda x: x[1],
+                reverse=True,
+            ):
+                source_table.add_row(source_name, str(count))
 
-                console.print(
-                    Panel(source_table, title="Sessions by Source", border_style="magenta")
+            console.print(Panel(source_table, title="Sessions by Source", border_style="magenta"))
+
+        if (group_by == "model" or group_by is None) and stats_data["models_used"]:
+            # Models used
+            model_table = Table(show_header=True, header_style="bold")
+            model_table.add_column("Model")
+            model_table.add_column("Provider")
+            model_table.add_column("Messages", justify="right")
+            model_table.add_column("Tokens", justify="right")
+
+            for model in stats_data["models_used"][:10]:
+                total_tokens = model["input_tokens"] + model["output_tokens"]
+                model_table.add_row(
+                    model["model_id"],
+                    model["provider"] or "[dim]—[/dim]",
+                    str(model["message_count"]),
+                    f"{total_tokens:,}",
                 )
 
-        if group_by == "model" or group_by is None:
-            # Models used
-            if stats_data["models_used"]:
-                model_table = Table(show_header=True, header_style="bold")
-                model_table.add_column("Model")
-                model_table.add_column("Provider")
-                model_table.add_column("Messages", justify="right")
-                model_table.add_column("Tokens", justify="right")
-
-                for model in stats_data["models_used"][:10]:
-                    total_tokens = model["input_tokens"] + model["output_tokens"]
-                    model_table.add_row(
-                        model["model_id"],
-                        model["provider"] or "[dim]—[/dim]",
-                        str(model["message_count"]),
-                        f"{total_tokens:,}",
-                    )
-
-                console.print(Panel(model_table, title="Models Used", border_style="green"))
+            console.print(Panel(model_table, title="Models Used", border_style="green"))
 
         # Tools used
         if stats_data["tools_used"] and group_by is None:
@@ -707,10 +704,10 @@ def stats(group_by: str | None) -> None:
 def heatmap(weeks: int, metric: str) -> None:
     """Show activity heatmap (GitHub-style contributions)."""
     from sagg.analytics.heatmap import (
-        get_activity_by_day,
         generate_heatmap_data,
-        render_heatmap,
+        get_activity_by_day,
         get_month_labels,
+        render_heatmap,
     )
 
     try:
@@ -812,7 +809,7 @@ def git_link(project: str | None, do_update: bool, since: str | None) -> None:
     if since:
         try:
             delta = parse_duration(since)
-            since_dt = datetime.now(timezone.utc) - delta
+            since_dt = datetime.now(UTC) - delta
         except ValueError as e:
             error_console.print(f"[red]Error:[/red] {e}")
             sys.exit(1)
@@ -916,55 +913,55 @@ def summarize(days: int, project: str | None, detailed: bool) -> None:
         error_console.print(f"[red]Error initializing store:[/red] {e}")
         sys.exit(1)
 
-    since_dt = datetime.now(timezone.utc) - timedelta(days=days)
-    
+    since_dt = datetime.now(UTC) - timedelta(days=days)
+
     try:
         # Fetch sessions (limit to 1000 to be safe)
         sessions = store.list_sessions(project=project, since=since_dt, limit=1000)
-        
+
         if not sessions:
             console.print(f"[yellow]No sessions found in the last {days} day(s).[/yellow]")
             return
 
         # Group by Project -> Date
         grouped: dict[str, dict[str, list[UnifiedSession]]] = {}
-        
+
         for session in sessions:
             proj = session.project_name or "Unknown Project"
             date_str = session.updated_at.strftime("%Y-%m-%d")
-            
+
             if proj not in grouped:
                 grouped[proj] = {}
             if date_str not in grouped[proj]:
                 grouped[proj][date_str] = []
-                
+
             grouped[proj][date_str].append(session)
 
         # Render Markdown
         console.print(f"# Work Summary (Last {days} Days)\n")
-        
+
         for proj, dates in sorted(grouped.items()):
             console.print(f"## Project: [cyan]{proj}[/cyan]")
-            
+
             for date_str, sess_list in sorted(dates.items(), reverse=True):
                 console.print(f"### {date_str}")
-                
+
                 for s in sess_list:
                     duration_mins = (s.duration_ms or 0) // 60000
                     duration_str = f"{duration_mins}m" if duration_mins > 0 else "<1m"
-                    
+
                     # Heuristic for title if generic
                     title = s.title or "Untitled Session"
-                    
+
                     console.print(f"- **{title}** ({duration_str})")
-                    
+
                     if detailed and s.stats.files_modified:
                         files_str = ", ".join(f"`{f}`" for f in s.stats.files_modified[:5])
                         if len(s.stats.files_modified) > 5:
                             files_str += f" and {len(s.stats.files_modified) - 5} more"
                         console.print(f"  - Modified: {files_str}")
-                
-                console.print("") # spacing
+
+                console.print("")  # spacing
 
     finally:
         store.close()
@@ -1109,9 +1106,9 @@ def oracle(query: str, top: int, verbose: bool) -> None:
 
         for result in results:
             # Calculate time ago
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if result.timestamp.tzinfo is None:
-                timestamp = result.timestamp.replace(tzinfo=timezone.utc)
+                timestamp = result.timestamp.replace(tzinfo=UTC)
             else:
                 timestamp = result.timestamp
 
@@ -1218,8 +1215,6 @@ def sync(source: str | None, watch: bool, dry_run: bool, debounce: int) -> None:
 
 def _run_sync_once(syncer, source: str | None, dry_run: bool) -> None:
     """Run a one-time sync operation."""
-    from rich.live import Live
-
     mode_label = "[dim](dry run)[/dim] " if dry_run else ""
     console.print(f"{mode_label}[bold]Syncing sessions...[/bold]")
 
@@ -1241,7 +1236,9 @@ def _run_sync_once(syncer, source: str | None, dry_run: bool) -> None:
         if new_count > 0:
             console.print(f"  [green]+{new_count}[/green] new from [cyan]{src_name}[/cyan]")
         elif skipped_count > 0:
-            console.print(f"  [dim]No new sessions from {src_name} ({skipped_count} already imported)[/dim]")
+            console.print(
+                f"  [dim]No new sessions from {src_name} ({skipped_count} already imported)[/dim]"
+            )
         else:
             console.print(f"  [dim]No sessions found from {src_name}[/dim]")
 
@@ -1253,8 +1250,6 @@ def _run_sync_once(syncer, source: str | None, dry_run: bool) -> None:
 
 def _run_watch_mode(syncer, source: str | None, debounce: int, dry_run: bool) -> None:
     """Run continuous watch mode."""
-    from rich.live import Live
-
     mode_label = "[dim](dry run)[/dim] " if dry_run else ""
     console.print(f"{mode_label}[bold]Watching for changes...[/bold] (Ctrl+C to stop)\n")
 
@@ -1313,7 +1308,7 @@ def bundle_export(output: str, since: str | None, project: str | None, source: s
     if since:
         try:
             delta = parse_duration(since)
-            since_dt = datetime.now(timezone.utc) - delta
+            since_dt = datetime.now(UTC) - delta
         except ValueError as e:
             error_console.print(f"[red]Error:[/red] {e}")
             sys.exit(1)
@@ -1373,9 +1368,7 @@ def bundle_export(output: str, since: str | None, project: str | None, source: s
 )
 @click.option("--dry-run", is_flag=True, help="Preview without importing")
 @click.option("--verify", "verify_first", is_flag=True, help="Verify integrity before import")
-def bundle_import(
-    bundle_file: str, strategy: str, dry_run: bool, verify_first: bool
-) -> None:
+def bundle_import(bundle_file: str, strategy: str, dry_run: bool, verify_first: bool) -> None:
     """Import sessions from a bundle.
 
     Imports sessions from a .sagg bundle file created on another machine
@@ -1489,7 +1482,7 @@ def friction_points(since: str | None, threshold: int, top: int) -> None:
     if since:
         try:
             delta = parse_duration(since)
-            since_dt = datetime.now(timezone.utc) - delta
+            since_dt = datetime.now(UTC) - delta
         except ValueError as e:
             error_console.print(f"[red]Error:[/red] {e}")
             sys.exit(1)
@@ -1667,8 +1660,6 @@ def budget_show() -> None:
     - Yellow: 80-95% usage (warning)
     - Red: Above 95% usage (critical)
     """
-    from rich.progress import BarColumn, Progress, TaskID, TextColumn
-
     try:
         store = SessionStore()
     except Exception as e:
@@ -1717,11 +1708,8 @@ def budget_show() -> None:
             filled = min(filled, bar_width)  # Cap at 100%
             bar = "[" + "=" * filled + " " * (bar_width - filled) + "]"
 
-            console.print(f"[bold]Daily Budget[/bold]")
-            console.print(
-                f"  [{color}]{bar}[/{color}] "
-                f"[{color}]{daily_pct:.1f}%[/{color}]"
-            )
+            console.print("[bold]Daily Budget[/bold]")
+            console.print(f"  [{color}]{bar}[/{color}] [{color}]{daily_pct:.1f}%[/{color}]")
             console.print(
                 f"  [dim]Used:[/dim] {format_tokens(daily_usage)} / {format_tokens(daily_budget)}"
             )
@@ -1738,11 +1726,8 @@ def budget_show() -> None:
             filled = min(filled, bar_width)  # Cap at 100%
             bar = "[" + "=" * filled + " " * (bar_width - filled) + "]"
 
-            console.print(f"[bold]Weekly Budget[/bold]")
-            console.print(
-                f"  [{color}]{bar}[/{color}] "
-                f"[{color}]{weekly_pct:.1f}%[/{color}]"
-            )
+            console.print("[bold]Weekly Budget[/bold]")
+            console.print(f"  [{color}]{bar}[/{color}] [{color}]{weekly_pct:.1f}%[/{color}]")
             console.print(
                 f"  [dim]Used:[/dim] {format_tokens(weekly_usage)} / {format_tokens(weekly_budget)}"
             )
@@ -1813,7 +1798,9 @@ def budget_clear(weekly: bool, daily: bool) -> None:
 
 
 @cli.command("analyze-sessions")
-@click.option("--since", type=str, default="30d", help="Analyze sessions from last N (e.g., 7d, 30d)")
+@click.option(
+    "--since", type=str, default="30d", help="Analyze sessions from last N (e.g., 7d, 30d)"
+)
 @click.option("--source", "-s", type=str, help="Filter by source tool")
 @click.option("--project", "-p", type=str, help="Filter by project")
 @click.option("--force", is_flag=True, help="Re-analyze sessions that already have facets")
@@ -1823,7 +1810,11 @@ def budget_clear(weekly: bool, daily: bool) -> None:
     default="heuristic",
     help="Analysis method (default: heuristic)",
 )
-@click.option("--llm-cli", type=str, help="Which CLI for LLM (claude, codex, gemini). Auto-detects if omitted.")
+@click.option(
+    "--llm-cli",
+    type=str,
+    help="Which CLI for LLM (claude, codex, gemini). Auto-detects if omitted.",
+)
 @click.option("--batch-size", type=int, default=10, show_default=True, help="Sessions per LLM call")
 @click.option(
     "--resume/--no-resume",
@@ -1861,7 +1852,7 @@ def analyze_sessions(
 
     try:
         delta = parse_duration(since)
-        since_dt = datetime.now(timezone.utc) - delta
+        since_dt = datetime.now(UTC) - delta
     except ValueError as e:
         error_console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
@@ -1875,7 +1866,9 @@ def analyze_sessions(
     try:
         # Get sessions to analyze
         if force:
-            sessions = store.list_sessions(source=source, project=project, since=since_dt, limit=5000)
+            sessions = store.list_sessions(
+                source=source, project=project, since=since_dt, limit=5000
+            )
         else:
             sessions = store.get_unfaceted_sessions(
                 since=since_dt,
@@ -1926,7 +1919,9 @@ def analyze_sessions(
 
             completed_ids: set[str] = set()
             if force and resume:
-                existing_facets = store.get_facets(source=source, since=since_dt, project=project, limit=10000)
+                existing_facets = store.get_facets(
+                    source=source, since=since_dt, project=project, limit=10000
+                )
                 completed_ids = {
                     f["session_id"]
                     for f in existing_facets
@@ -1957,7 +1952,7 @@ def analyze_sessions(
                 llm_sessions.append(full_session)
 
             for i in range(0, len(llm_sessions), batch_size):
-                chunk = llm_sessions[i:i + batch_size]
+                chunk = llm_sessions[i : i + batch_size]
                 try:
                     facets = analyze_sessions_llm_batch(chunk, backend_name=backend)
                 except Exception as e:
@@ -1965,7 +1960,9 @@ def analyze_sessions(
                         error_console.print(
                             f"  [yellow]![/yellow] Batch failed ({len(chunk)} sessions): {e}"
                         )
-                        error_console.print("  [dim]Falling back to per-session LLM calls for this batch[/dim]")
+                        error_console.print(
+                            "  [dim]Falling back to per-session LLM calls for this batch[/dim]"
+                        )
                     facets = []
                     for single_session in chunk:
                         try:
@@ -1998,7 +1995,9 @@ def analyze_sessions(
                     end="",
                 )
             if skipped_non_substantive:
-                console.print(f" [dim]({skipped_non_substantive} skipped non-substantive)[/dim]", end="")
+                console.print(
+                    f" [dim]({skipped_non_substantive} skipped non-substantive)[/dim]", end=""
+                )
             if errors:
                 console.print(f" [yellow]({errors} errors)[/yellow]")
             else:
@@ -2039,7 +2038,9 @@ def analyze_sessions(
 
         console.print(f"\n[bold green]Analyzed {analyzed} session(s)[/bold green]", end="")
         if skipped_non_substantive:
-            console.print(f" [dim]({skipped_non_substantive} skipped non-substantive)[/dim]", end="")
+            console.print(
+                f" [dim]({skipped_non_substantive} skipped non-substantive)[/dim]", end=""
+            )
         if errors:
             console.print(f" [yellow]({errors} errors)[/yellow]")
         else:
@@ -2084,7 +2085,7 @@ def insights(
     """
     try:
         delta = parse_duration(since)
-        since_dt = datetime.now(timezone.utc) - delta
+        since_dt = datetime.now(UTC) - delta
     except ValueError as e:
         error_console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
@@ -2118,7 +2119,7 @@ def insights(
             facets=facets,
             stats=stats,
             range_start=since_dt,
-            range_end=datetime.now(timezone.utc),
+            range_end=datetime.now(UTC),
         )
 
         # Output
@@ -2173,13 +2174,15 @@ def _print_insights_cli(report: dict, verbose: bool = False) -> None:
 
     # At a Glance
     if glance.get("whats_working"):
-        console.print(Panel(
-            f"[bold]Working:[/bold] {glance['whats_working']}\n\n"
-            f"[bold]Hindering:[/bold] {glance.get('whats_hindering', '')}\n\n"
-            f"[bold]Quick win:[/bold] {glance.get('quick_wins', '')}",
-            title="At a Glance",
-            border_style="yellow",
-        ))
+        console.print(
+            Panel(
+                f"[bold]Working:[/bold] {glance['whats_working']}\n\n"
+                f"[bold]Hindering:[/bold] {glance.get('whats_hindering', '')}\n\n"
+                f"[bold]Quick win:[/bold] {glance.get('quick_wins', '')}",
+                title="At a Glance",
+                border_style="yellow",
+            )
+        )
 
     # Tool Comparison
     metrics = tool_comp.get("tool_metrics", [])
@@ -2260,7 +2263,9 @@ def _print_insights_cli(report: dict, verbose: bool = False) -> None:
         console.print("[bold]Tool Recommendations[/bold]")
         for r in recs[:5]:
             confidence = f"{'●' * int(r['confidence'] * 5)}{'○' * (5 - int(r['confidence'] * 5))}"
-            console.print(f"  {r['task_type']:20s} → [cyan]{r['recommended_tool']}[/cyan]  [{confidence}]")
+            console.print(
+                f"  {r['task_type']:20s} → [cyan]{r['recommended_tool']}[/cyan]  [{confidence}]"
+            )
         console.print()
 
     # Trends
@@ -2272,10 +2277,12 @@ def _print_insights_cli(report: dict, verbose: bool = False) -> None:
     # Fun ending
     if fun.get("headline"):
         console.print()
-        console.print(Panel(
-            f"[bold]{fun['headline']}[/bold]\n[dim]{fun.get('detail', '')}[/dim]",
-            border_style="yellow",
-        ))
+        console.print(
+            Panel(
+                f"[bold]{fun['headline']}[/bold]\n[dim]{fun.get('detail', '')}[/dim]",
+                border_style="yellow",
+            )
+        )
 
 
 def main() -> None:
