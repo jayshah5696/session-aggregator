@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from sagg.models import (
     GitContext,
     Message,
     ModelUsage,
-    Part,
     SessionStats,
     SourceTool,
     Turn,
@@ -196,6 +194,43 @@ class SessionStore:
 
         return UnifiedSession.messages_from_jsonl(content)
 
+    def _get_models_for_sessions(self, session_ids: list[str]) -> dict[str, list[ModelUsage]]:
+        """Batch fetch model usage for multiple sessions to avoid N+1 queries.
+
+        Args:
+            session_ids: List of session IDs to fetch models for.
+
+        Returns:
+            Dictionary mapping session ID to list of ModelUsage.
+        """
+        if not session_ids:
+            return {}
+
+        results: dict[str, list[ModelUsage]] = {sid: [] for sid in session_ids}
+
+        # Handle SQLite parameter limit (usually 999 or 32766)
+        # Using 500 for maximum safety and efficiency
+        chunk_size = 500
+        for i in range(0, len(session_ids), chunk_size):
+            chunk = session_ids[i : i + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = self._db.execute(
+                f"SELECT * FROM session_models WHERE session_id IN ({placeholders})",
+                tuple(chunk),
+            )
+            for row in cursor:
+                results[row["session_id"]].append(
+                    ModelUsage(
+                        model_id=row["model_id"],
+                        provider=row["provider"],
+                        message_count=row["message_count"],
+                        input_tokens=row["input_tokens"],
+                        output_tokens=row["output_tokens"],
+                    )
+                )
+
+        return results
+
     def get_session(self, session_id: str) -> UnifiedSession | None:
         """Get a session by ID.
 
@@ -260,7 +295,18 @@ class SessionStore:
         params.append(offset)
 
         cursor = self._db.execute(query, tuple(params))
-        return [self._row_to_session(row, include_content=False) for row in cursor]
+        rows = cursor.fetchall()
+
+        # Batch fetch models for all sessions to avoid N+1 queries
+        session_ids = [row["id"] for row in rows]
+        all_models = self._get_models_for_sessions(session_ids)
+
+        return [
+            self._row_to_session(
+                row, include_content=False, pre_fetched_models=all_models.get(row["id"])
+            )
+            for row in rows
+        ]
 
     def search_sessions(self, query: str, limit: int = 50) -> list[UnifiedSession]:
         """Search sessions using full-text search.
@@ -283,7 +329,18 @@ class SessionStore:
             """,
             (query, limit),
         )
-        return [self._row_to_session(row, include_content=False) for row in cursor]
+        rows = cursor.fetchall()
+
+        # Batch fetch models
+        session_ids = [row["id"] for row in rows]
+        all_models = self._get_models_for_sessions(session_ids)
+
+        return [
+            self._row_to_session(
+                row, include_content=False, pre_fetched_models=all_models.get(row["id"])
+            )
+            for row in rows
+        ]
 
     def search_sessions_ranked(
         self, query: str, limit: int = 50
@@ -311,9 +368,17 @@ class SessionStore:
             """,
             (query, limit),
         )
+        rows = cursor.fetchall()
+
+        # Batch fetch models
+        session_ids = [row["id"] for row in rows]
+        all_models = self._get_models_for_sessions(session_ids)
+
         results = []
-        for row in cursor:
-            session = self._row_to_session(row, include_content=True)
+        for row in rows:
+            session = self._row_to_session(
+                row, include_content=True, pre_fetched_models=all_models.get(row["id"])
+            )
             relevance = row["relevance"]
             results.append((session, relevance))
         return results
@@ -407,10 +472,7 @@ class SessionStore:
             """,
             (int(since.timestamp()),),
         )
-        return {
-            row["day"]: {"count": row["count"], "tokens": row["tokens"] or 0}
-            for row in cursor
-        }
+        return {row["day"]: {"count": row["count"], "tokens": row["tokens"] or 0} for row in cursor}
 
     def get_stats(self) -> dict:
         """Get aggregate statistics.
@@ -485,17 +547,23 @@ class SessionStore:
 
         return stats
 
-    def _row_to_session(self, row: dict, include_content: bool = False) -> UnifiedSession:
+    def _row_to_session(
+        self,
+        row: dict,
+        include_content: bool = False,
+        pre_fetched_models: list[ModelUsage] | None = None,
+    ) -> UnifiedSession:
         """Convert a database row to a UnifiedSession.
 
         Args:
             row: Database row (dict-like).
             include_content: Whether to load full content from JSONL.
+            pre_fetched_models: Pre-fetched model usage details to avoid N+1 queries.
 
         Returns:
             UnifiedSession instance.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         # Parse JSON fields
         models_json = row["models_json"]
@@ -506,7 +574,9 @@ class SessionStore:
 
         # Get model details if available
         models = []
-        if models_list:
+        if pre_fetched_models is not None:
+            models = pre_fetched_models
+        elif models_list:
             cursor = self._db.execute(
                 "SELECT * FROM session_models WHERE session_id = ?", (row["id"],)
             )
@@ -557,8 +627,8 @@ class SessionStore:
             project_path=row["project_path"],
             project_name=row["project_name"],
             git=git,
-            created_at=datetime.fromtimestamp(row["created_at"], tz=timezone.utc),
-            updated_at=datetime.fromtimestamp(row["updated_at"], tz=timezone.utc),
+            created_at=datetime.fromtimestamp(row["created_at"], tz=UTC),
+            updated_at=datetime.fromtimestamp(row["updated_at"], tz=UTC),
             duration_ms=row["duration_ms"],
             stats=stats,
             models=models,
@@ -812,7 +882,18 @@ class SessionStore:
         params.append(limit)
 
         cursor = self._db.execute(query, tuple(params))
-        return [self._row_to_session(row, include_content=False) for row in cursor]
+        rows = cursor.fetchall()
+
+        # Batch fetch models
+        session_ids = [row["id"] for row in rows]
+        all_models = self._get_models_for_sessions(session_ids)
+
+        return [
+            self._row_to_session(
+                row, include_content=False, pre_fetched_models=all_models.get(row["id"])
+            )
+            for row in rows
+        ]
 
     def get_facet_stats(self) -> dict:
         """Get aggregated facet statistics.
@@ -859,22 +940,32 @@ class SessionStore:
             "analyzer_version": row["analyzer_version"],
             "analyzer_model": row["analyzer_model"],
             "underlying_goal": row["underlying_goal"],
-            "goal_categories": json.loads(row["goal_categories_json"]) if row["goal_categories_json"] else {},
+            "goal_categories": json.loads(row["goal_categories_json"])
+            if row["goal_categories_json"]
+            else {},
             "task_type": row["task_type"],
             "outcome": row["outcome"],
             "completion_confidence": row["completion_confidence"],
             "session_type": row["session_type"],
             "complexity_score": row["complexity_score"],
-            "friction_counts": json.loads(row["friction_counts_json"]) if row["friction_counts_json"] else {},
+            "friction_counts": json.loads(row["friction_counts_json"])
+            if row["friction_counts_json"]
+            else {},
             "friction_detail": row["friction_detail"],
             "friction_score": row["friction_score"],
-            "tools_that_helped": json.loads(row["tools_helped_json"]) if row["tools_helped_json"] else [],
-            "tools_that_didnt": json.loads(row["tools_didnt_json"]) if row["tools_didnt_json"] else [],
+            "tools_that_helped": json.loads(row["tools_helped_json"])
+            if row["tools_helped_json"]
+            else [],
+            "tools_that_didnt": json.loads(row["tools_didnt_json"])
+            if row["tools_didnt_json"]
+            else [],
             "tool_helpfulness": row["tool_helpfulness"],
             "primary_language": row["primary_language"],
             "files_pattern": row["files_pattern"],
             "brief_summary": row["brief_summary"],
-            "key_decisions": json.loads(row["key_decisions_json"]) if row["key_decisions_json"] else [],
+            "key_decisions": json.loads(row["key_decisions_json"])
+            if row["key_decisions_json"]
+            else [],
         }
 
     # Budget management methods
@@ -932,9 +1023,8 @@ class SessionStore:
         Returns:
             Total tokens (input + output) used in the period.
         """
-        from datetime import timezone
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         if period == "daily":
             # Start of today (midnight UTC)
