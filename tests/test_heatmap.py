@@ -3,6 +3,7 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from unittest.mock import patch
 
 from sagg.analytics.heatmap import (
     get_activity_by_day,
@@ -183,9 +184,15 @@ class TestGenerateHeatmapData:
             assert len(row) == 4
             assert all(cell == 0 for cell in row)
 
-    def test_single_day_activity(self):
+    @patch("sagg.analytics.heatmap.datetime")
+    def test_single_day_activity(self, mock_datetime):
         """Test with activity on a single day."""
-        # Use a known Sunday
+        # Mock current date so it falls within the 4-week range
+        # Let's say today is 2026-02-01 (a Sunday)
+        mock_now = datetime(2026, 2, 1, tzinfo=timezone.utc)
+        mock_datetime.now.return_value = mock_now
+
+        # Use a known Sunday within 4 weeks of 2026-02-01
         sunday = datetime(2026, 1, 25, tzinfo=timezone.utc)  # This is a Sunday
         activity = {sunday.strftime("%Y-%m-%d"): 5}
 

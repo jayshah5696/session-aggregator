@@ -331,3 +331,13 @@ class TestWatchMode:
 
         paths = syncer.get_watch_paths()
         assert len(paths) == 0
+
+    def test_watch_raises_import_error_without_watchfiles(self, session_store):
+        """Test that watch raises ImportError if watchfiles is not installed."""
+        adapter = MockAdapter("mock")
+        syncer = SessionSyncer(session_store, [adapter])
+
+        with patch.dict("sys.modules", {"watchfiles": None}):
+            with pytest.raises(ImportError, match="watchfiles is required for watch mode. Install it with: uv add watchfiles"):
+                # watch() returns a generator, so we must advance it to trigger execution
+                next(syncer.watch())
