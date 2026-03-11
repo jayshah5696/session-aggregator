@@ -3,12 +3,14 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from unittest.mock import patch
 
 from sagg.analytics.heatmap import (
     get_activity_by_day,
     generate_heatmap_data,
     render_heatmap,
     calculate_intensity,
+    get_month_labels,
 )
 from sagg.models import (
     UnifiedSession,
@@ -189,15 +191,21 @@ class TestGenerateHeatmapData:
         sunday = datetime(2026, 1, 25, tzinfo=timezone.utc)  # This is a Sunday
         activity = {sunday.strftime("%Y-%m-%d"): 5}
 
-        data = generate_heatmap_data(activity, weeks=4)
+        # Mock now to be close to the test date to ensure it's within the 'weeks' range
+        fixed_now = datetime(2026, 2, 1, tzinfo=timezone.utc)  # Sunday
+        with patch("sagg.analytics.heatmap.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
 
-        # Should have 7 rows
-        assert len(data) == 7
+            data = generate_heatmap_data(activity, weeks=4)
 
-        # Find the cell that should have data
-        # Row 0 is Sunday
-        total_cells_with_data = sum(1 for row in data for cell in row if cell > 0)
-        assert total_cells_with_data == 1
+            # Should have 7 rows
+            assert len(data) == 7
+
+            # Find the cell that should have data
+            # Row 0 is Sunday
+            total_cells_with_data = sum(1 for row in data for cell in row if cell > 0)
+            assert total_cells_with_data == 1
 
     def test_correct_dimensions(self):
         """Test output dimensions match weeks parameter."""
@@ -272,3 +280,51 @@ class TestRenderHeatmap:
                 assert "▓" in output
             elif intensity == 4:
                 assert "█" in output
+
+
+class TestGetMonthLabels:
+    """Tests for get_month_labels function."""
+
+    def test_get_month_labels_basic(self):
+        """Test generating month labels for a standard 4-week range."""
+        fixed_now = datetime(2024, 5, 20, tzinfo=timezone.utc)  # Monday, May 20
+        # 4 weeks ago starts on Sunday, April 21
+        # week 0: Apr 21
+        # week 1: Apr 28
+        # week 2: May 5
+        # week 3: May 12
+
+        with patch("sagg.analytics.heatmap.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            # Mock datetime behavior
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+            labels = get_month_labels(4)
+            assert labels == [(0, "Apr"), (2, "May")]
+
+    def test_get_month_labels_boundary(self):
+        """Test month labels when starting exactly on a month boundary."""
+        # June 1st, 2024 is a Saturday
+        # If we look back 1 week:
+        # start_date = June 1 - (1*7 - 1) = June 1 - 6 = May 26 (Sunday)
+        # Week 0: May 26 (May)
+        fixed_now = datetime(2024, 6, 1, tzinfo=timezone.utc)
+
+        with patch("sagg.analytics.heatmap.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+            labels = get_month_labels(1)
+            assert labels == [(0, "May")]
+
+    def test_get_month_labels_many_weeks(self):
+        """Test generating labels for a longer period (12 weeks)."""
+        fixed_now = datetime(2024, 5, 20, tzinfo=timezone.utc)
+
+        with patch("sagg.analytics.heatmap.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+            labels = get_month_labels(12)
+            # Result for 12 weeks: [(0, 'Feb'), (1, 'Mar'), (6, 'Apr'), (10, 'May')]
+            assert labels == [(0, "Feb"), (1, "Mar"), (6, "Apr"), (10, "May")]
