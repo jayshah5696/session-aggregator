@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from sagg.models import (
     GitContext,
     Message,
     ModelUsage,
-    Part,
     SessionStats,
     SourceTool,
     Turn,
@@ -30,6 +28,19 @@ class SessionStore:
 
     Manages both SQLite metadata storage and JSONL content files.
     """
+
+    # Whitelist of trusted SQL condition fragments to prevent injection.
+    # All user-provided values must be passed via ? placeholders in params.
+    _TRUSTED_CONDITIONS = {
+        "source = ?",
+        "s.source = ?",
+        "f.source = ?",
+        "(project_path LIKE ? OR project_name LIKE ?)",
+        "(s.project_path LIKE ? OR s.project_name LIKE ?)",
+        "created_at >= ?",
+        "s.created_at >= ?",
+        "f.session_id IS NULL",
+    }
 
     def __init__(
         self,
@@ -248,14 +259,15 @@ class SessionStore:
             conditions.append("created_at >= ?")
             params.append(int(since.timestamp()))
 
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        where_clause = self._safe_join_conditions(conditions)
 
-        query = f"""
-            SELECT * FROM sessions
-            WHERE {where_clause}
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-        """
+        # Construct query using trusted condition fragments and placeholders
+        query = (
+            "SELECT * FROM sessions "
+            f"WHERE {where_clause} "
+            "ORDER BY created_at DESC "
+            "LIMIT ? OFFSET ?"
+        )
         params.append(limit)
         params.append(offset)
 
@@ -495,7 +507,7 @@ class SessionStore:
         Returns:
             UnifiedSession instance.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         # Parse JSON fields
         models_json = row["models_json"]
@@ -752,15 +764,16 @@ class SessionStore:
             params.append(f"%{project}%")
             params.append(f"%{project}%")
 
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        where_clause = self._safe_join_conditions(conditions)
 
-        query = f"""
-            SELECT f.* FROM session_facets f
-            JOIN sessions s ON f.session_id = s.id
-            WHERE {where_clause}
-            ORDER BY s.created_at DESC
-            LIMIT ?
-        """
+        # Construct query using trusted condition fragments and placeholders
+        query = (
+            "SELECT f.* FROM session_facets f "
+            "JOIN sessions s ON f.session_id = s.id "
+            f"WHERE {where_clause} "
+            "ORDER BY s.created_at DESC "
+            "LIMIT ?"
+        )
         params.append(limit)
 
         cursor = self._db.execute(query, tuple(params))
@@ -800,15 +813,16 @@ class SessionStore:
             params.append(f"%{project}%")
             params.append(f"%{project}%")
 
-        where_clause = " AND ".join(conditions)
+        where_clause = self._safe_join_conditions(conditions)
 
-        query = f"""
-            SELECT s.* FROM sessions s
-            LEFT JOIN session_facets f ON s.id = f.session_id
-            WHERE {where_clause}
-            ORDER BY s.created_at DESC
-            LIMIT ?
-        """
+        # Construct query using trusted condition fragments and placeholders
+        query = (
+            "SELECT s.* FROM sessions s "
+            "LEFT JOIN session_facets f ON s.id = f.session_id "
+            f"WHERE {where_clause} "
+            "ORDER BY s.created_at DESC "
+            "LIMIT ?"
+        )
         params.append(limit)
 
         cursor = self._db.execute(query, tuple(params))
@@ -932,7 +946,6 @@ class SessionStore:
         Returns:
             Total tokens (input + output) used in the period.
         """
-        from datetime import timezone
 
         now = datetime.now(timezone.utc)
 
@@ -959,3 +972,21 @@ class SessionStore:
         )
         row = cursor.fetchone()
         return row["total"] if row else 0
+
+    def _safe_join_conditions(self, conditions: list[str]) -> str:
+        """Joins conditions after ensuring they are trusted structural fragments.
+
+        Args:
+            conditions: List of SQL condition fragments.
+
+        Returns:
+            A joined WHERE clause string.
+
+        Raises:
+            ValueError: If an untrusted condition fragment is encountered.
+        """
+        for c in conditions:
+            if c not in self._TRUSTED_CONDITIONS:
+                raise ValueError(f"Untrusted SQL condition fragment: {c}")
+
+        return " AND ".join(conditions) if conditions else "1=1"
