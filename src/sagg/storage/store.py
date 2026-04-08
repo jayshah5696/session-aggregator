@@ -217,6 +217,7 @@ class SessionStore:
         source: str | None = None,
         project: str | None = None,
         since: datetime | None = None,
+        updated_since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[UnifiedSession]:
@@ -226,6 +227,7 @@ class SessionStore:
             source: Filter by source tool (opencode, claude, etc.).
             project: Filter by project path (partial match).
             since: Only include sessions created after this datetime.
+            updated_since: Only include sessions updated after this datetime.
             limit: Maximum number of sessions to return.
             offset: Number of sessions to skip.
 
@@ -247,6 +249,10 @@ class SessionStore:
         if since is not None:
             conditions.append("created_at >= ?")
             params.append(int(since.timestamp()))
+
+        if updated_since is not None:
+            conditions.append("updated_at >= ?")
+            params.append(int(updated_since.timestamp()))
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 

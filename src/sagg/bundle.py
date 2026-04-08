@@ -101,12 +101,9 @@ def export_bundle(
     sessions = store.list_sessions(
         source=source,
         project=project,
+        since=since,
         limit=100000,  # Large limit to get all matching sessions
     )
-
-    # Apply since filter
-    if since is not None:
-        sessions = [s for s in sessions if s.created_at >= since]
 
     # Prepare content for checksum calculation
     content_lines = []
