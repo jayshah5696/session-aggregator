@@ -825,11 +825,11 @@ def git_link(project: str | None, do_update: bool, since: str | None) -> None:
 
     try:
         # Get sessions
-        sessions = store.list_sessions(project=project, limit=500)
-
-        # Filter by since if provided
-        if since_dt:
-            sessions = [s for s in sessions if s.updated_at >= since_dt]
+        sessions = store.list_sessions(
+            project=project,
+            updated_since=since_dt,
+            limit=500,
+        )
 
         if not sessions:
             console.print("[dim]No sessions found.[/dim]")
